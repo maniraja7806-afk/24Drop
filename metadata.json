@@ -1,0 +1,6 @@
+{
+  "name": "24Drop",
+  "description": "Share Anything. Gone in 24 Hours. Temporary multimedia sharing and messaging platform.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
