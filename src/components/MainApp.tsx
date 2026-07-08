@@ -11,6 +11,22 @@ import { AudioVisualizer } from './AudioVisualizer';
 import EmojiPicker, { Theme } from 'emoji-picker-react';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 
+const highlightText = (text: string, query: string) => {
+  if (!query) return text;
+  const parts = text.split(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\export function MainApp')})`, 'gi'));
+  return (
+    <>
+      {parts.map((part, i) => 
+        part.toLowerCase() === query.toLowerCase() ? (
+          <mark key={i} className="bg-yellow-500/40 text-inherit rounded-sm px-0.5">{part}</mark>
+        ) : (
+          part
+        )
+      )}
+    </>
+  );
+};
+
 export function MainApp({ session, onLogout }: { session: any; onLogout: () => void }) {
   const [view, setView] = useState<'feed' | 'chat'>('feed');
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -652,7 +668,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           isMe ? "bg-white text-black rounded-br-sm" : "bg-neutral-800 text-white rounded-bl-sm"
                         )}
                       >
-                        {msg.content && <div className="whitespace-pre-wrap">{msg.content}</div>}
+                        {msg.content && <div className="whitespace-pre-wrap">{highlightText(msg.content, chatSearchQuery)}</div>}
                         {msg.fileUrl && (
                           <div className="mt-2 rounded-lg overflow-hidden">
                             {msg.fileType?.startsWith('image/') ? (
