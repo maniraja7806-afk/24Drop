@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera } from 'lucide-react';
+import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause } from 'lucide-react';
 import { fetchApi } from '../lib/api';
 import { socket } from '../lib/socket';
 import { Countdown } from './Countdown';
@@ -8,12 +8,17 @@ import clsx from 'clsx';
 import { initAuth, googleSignIn, getAccessToken } from '../lib/auth';
 import { loadPickerApi, openPicker } from '../lib/picker';
 import { AudioVisualizer } from './AudioVisualizer';
+import { LargeAudioVisualizer } from './LargeAudioVisualizer';
+import { AudioTrimmer } from './AudioTrimmer';
+import { RecordingTimer } from './RecordingTimer';
+import { AudioPlayer } from './AudioPlayer';
+import { DissolvingItem } from './DissolvingItem';
 import EmojiPicker, { Theme } from 'emoji-picker-react';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 
 const highlightText = (text: string, query: string) => {
   if (!query) return text;
-  const parts = text.split(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\export function MainApp')})`, 'gi'));
+  const parts = text.split(new RegExp(`(\${query.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')})`, 'gi'));
   return (
     <>
       {parts.map((part, i) => 
@@ -26,7 +31,6 @@ const highlightText = (text: string, query: string) => {
     </>
   );
 };
-
 export function MainApp({ session, onLogout }: { session: any; onLogout: () => void }) {
   const [view, setView] = useState<'feed' | 'chat'>('feed');
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -59,6 +63,10 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
   const [viewingImage, setViewingImage] = useState<string | null>(null);
   
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [isAudioPaused, setIsAudioPaused] = useState(false);
+  const [audioDraft, setAudioDraft] = useState<Blob | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const isDiscardingAudioRef = useRef(false);
   const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
@@ -183,10 +191,35 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     }
   };
 
+
+  const handleDiscardAudio = () => {
+    if (isRecordingAudio) {
+      isDiscardingAudioRef.current = true;
+      mediaRecorderRef.current?.stop();
+      setIsRecordingAudio(false);
+      setIsAudioPaused(false);
+      setAudioStream(null);
+    }
+  };
+
+  
+  const handlePauseResumeAudio = () => {
+    if (isRecordingAudio && mediaRecorderRef.current) {
+      if (isAudioPaused) {
+        mediaRecorderRef.current.resume();
+        setIsAudioPaused(false);
+      } else {
+        mediaRecorderRef.current.pause();
+        setIsAudioPaused(true);
+      }
+    }
+  };
+
   const handleMicClick = async () => {
     if (isRecordingAudio) {
       mediaRecorderRef.current?.stop();
       setIsRecordingAudio(false);
+      setIsAudioPaused(false);
       setAudioStream(null);
     } else {
       try {
@@ -203,9 +236,13 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         };
 
         mediaRecorder.onstop = () => {
+          if (isDiscardingAudioRef.current) {
+            isDiscardingAudioRef.current = false;
+            stream.getTracks().forEach(track => track.stop());
+            return;
+          }
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          const audioFile = new File([audioBlob], "voice_message.webm", { type: 'audio/webm' });
-          setFile(audioFile);
+          setAudioDraft(audioBlob);
           stream.getTracks().forEach(track => track.stop());
         };
 
@@ -428,6 +465,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
   return (
     <>
       <AnimatePresence>
+        
+
         {isCameraOpen && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -585,10 +624,11 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           {view === 'feed' ? (
             <div className="space-y-6 max-w-2xl mx-auto">
               {posts.map((post) => (
-                <motion.div 
+                <DissolvingItem 
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={post.id} 
+                  expiresAt={post.expiresAt}
                   className="bg-neutral-900 border border-white/10 rounded-2xl p-5 shadow-xl relative group"
                 >
                   <div className="flex items-center justify-between mb-4">
@@ -619,6 +659,10 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     <div className="rounded-xl overflow-hidden bg-neutral-950 border border-white/5">
                       {post.fileType?.startsWith('image/') ? (
                         <img src={post.fileUrl} alt="attachment" className="w-full max-h-96 object-cover cursor-pointer" onClick={() => setViewingImage(post.fileUrl)} />
+                      ) : post.fileType?.startsWith('audio/') ? (
+                        <div className="p-4">
+                          <AudioPlayer src={post.fileUrl} />
+                        </div>
                       ) : (
                         <div className="p-4 flex items-center space-x-3">
                           <div className="p-3 bg-white/5 rounded-lg">
@@ -629,7 +673,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                       )}
                     </div>
                   )}
-                </motion.div>
+                </DissolvingItem>
               ))}
               {posts.length === 0 && (
                 <div className="text-center text-neutral-500 py-12">No posts yet. Be the first to share!</div>
@@ -649,8 +693,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                 });
 
                 return (
-                  <div 
+                  <DissolvingItem 
                     key={msg.id} 
+                    expiresAt={msg.expiresAt}
                     className={clsx("flex flex-col max-w-[80%] group", isMe ? "self-end items-end" : "self-start items-start")}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -673,6 +718,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           <div className="mt-2 rounded-lg overflow-hidden">
                             {msg.fileType?.startsWith('image/') ? (
                               <img src={msg.fileUrl} alt="attachment" className="max-w-full rounded-md cursor-pointer" onClick={() => setViewingImage(msg.fileUrl)} />
+                            ) : msg.fileType?.startsWith('audio/') ? (
+                              <AudioPlayer src={msg.fileUrl} />
                             ) : (
                               <a href={msg.fileUrl} target="_blank" rel="noreferrer" className="underline opacity-80">{msg.fileName}</a>
                             )}
@@ -758,7 +805,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         </div>
                       )}
                     </div>
-                  </div>
+                  </DissolvingItem>
                 );
               })}
               <div ref={messagesEndRef} />
@@ -791,6 +838,77 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                 </button>
               </div>
             )}
+            
+            <AnimatePresence>
+              {audioDraft && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, height: 0 }}
+                    animate={{ opacity: 1, y: 0, height: 'auto' }}
+                    exit={{ opacity: 0, y: 10, height: 0 }}
+                    className="flex items-end space-x-3 mb-2"
+                  >
+                    <AudioTrimmer 
+                      blob={audioDraft} 
+                      onCancel={() => setAudioDraft(null)} 
+                      onConfirm={(trimmedBlob) => {
+                        const audioFile = new File([trimmedBlob], "voice_message.wav", { type: 'audio/wav' });
+                        setFile(audioFile);
+                        setAudioDraft(null);
+                        setToastMessage("Recording finalized and ready to send");
+                        setTimeout(() => setToastMessage(null), 3000);
+                      }} 
+                    />
+                    <div className="w-12 h-12 flex-shrink-0" />
+                  </motion.div>
+              )}
+              {isRecordingAudio && audioStream && (
+                <div className="flex items-end space-x-3 mb-2">
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, height: 0 }}
+                    animate={{ opacity: 1, y: 0, height: 'auto' }}
+                    exit={{ opacity: 0, y: 10, height: 0 }}
+                    className="flex-1 bg-[#212121] rounded-[24px] px-1.5 py-1.5 shadow-2xl flex flex-col items-center justify-center relative overflow-hidden"
+                  >
+                    <div className="w-full flex items-center justify-center mb-4 px-4">
+                       <LargeAudioVisualizer stream={audioStream} />
+                    </div>
+
+                    <div className="flex items-center justify-between w-full px-6">
+                      <div className="flex items-center space-x-3">
+                        <button 
+                          onClick={handleDiscardAudio}
+                          className="w-8 h-8 rounded-full bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white flex items-center justify-center transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+
+                        <button 
+                          onClick={handlePauseResumeAudio}
+                          className="w-8 h-8 rounded-full bg-neutral-800 hover:bg-neutral-700 text-white flex items-center justify-center transition-colors"
+                        >
+                          {isAudioPaused ? <Play className="w-4 h-4 ml-0.5" /> : <Pause className="w-4 h-4" />}
+                        </button>
+                      </div>
+
+                      <div className="flex items-center space-x-2 text-white">
+                        {!isAudioPaused && <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />}
+                        {isAudioPaused && <div className="w-1.5 h-1.5 rounded-full bg-neutral-500" />}
+                        <span className="font-mono text-sm font-medium"><RecordingTimer isRecording={isRecordingAudio} isPaused={isAudioPaused} /></span>
+                      </div>
+
+                      <button 
+                        onClick={handleMicClick}
+                        className="w-10 h-10 bg-[#ea4335] hover:bg-[#d93025] rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95"
+                      >
+                        <Check className="w-5 h-5 text-white" />
+                      </button>
+                    </div>
+                  </motion.div>
+                  {/* Invisible placeholder for send button alignment */}
+                  <div className="w-12 h-12 flex-shrink-0" />
+                </div>
+              )}
+            </AnimatePresence>
             
             <div className="flex items-end space-x-3">
               <div className="flex-1 flex items-end bg-[#212121] rounded-[24px] px-1.5 py-1.5 shadow-2xl relative">
@@ -852,14 +970,10 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     onClick={handleMicClick}
                     className={clsx(
                       "p-1.5 transition-colors cursor-pointer rounded-full overflow-hidden flex items-center justify-center",
-                      isRecordingAudio ? "text-red-500 bg-red-500/10" : "text-neutral-400 hover:text-white"
+                      "text-neutral-400 hover:text-white"
                     )}
                   >
-                    {isRecordingAudio && audioStream ? (
-                      <AudioVisualizer stream={audioStream} />
-                    ) : (
-                      <Mic className="w-5 h-5" />
-                    )}
+                    <Mic className="w-5 h-5" />
                   </button>
                 </div>
               </div>
@@ -1013,6 +1127,20 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                 />
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-6 left-1/2 -translate-x-1/2 z-[200] bg-neutral-800 border border-white/10 text-white px-4 py-2 rounded-full shadow-2xl flex items-center space-x-2 text-sm"
+          >
+            <Check className="w-4 h-4 text-green-400" />
+            <span>{toastMessage}</span>
           </motion.div>
         )}
       </AnimatePresence>
