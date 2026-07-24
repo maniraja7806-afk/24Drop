@@ -26,6 +26,13 @@ export default function App() {
       setLoading(false);
     };
     checkSession();
+
+    const handleAuthError = () => {
+      localStorage.removeItem('sessionId');
+      setSession(null);
+    };
+    window.addEventListener('auth_error', handleAuthError);
+    return () => window.removeEventListener('auth_error', handleAuthError);
   }, []);
 
   const logout = () => {

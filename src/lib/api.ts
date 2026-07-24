@@ -13,6 +13,9 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      window.dispatchEvent(new Event('auth_error'));
+    }
     const error = await response.json().catch(() => ({}));
     throw new Error(error.error || `Error ${response.status}`);
   }

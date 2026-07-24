@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause } from 'lucide-react';
+import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause, Pin, PinOff } from 'lucide-react';
 import { fetchApi } from '../lib/api';
 import { socket } from '../lib/socket';
 import { Countdown } from './Countdown';
@@ -8,10 +8,12 @@ import clsx from 'clsx';
 import { initAuth, googleSignIn, getAccessToken } from '../lib/auth';
 import { loadPickerApi, openPicker } from '../lib/picker';
 import { AudioVisualizer } from './AudioVisualizer';
+import { Composer } from './Composer';
 import { LargeAudioVisualizer } from './LargeAudioVisualizer';
 import { AudioTrimmer } from './AudioTrimmer';
 import { RecordingTimer } from './RecordingTimer';
 import { AudioPlayer } from './AudioPlayer';
+import { ImageCropper } from './ImageCropper';
 import { DissolvingItem } from './DissolvingItem';
 import EmojiPicker, { Theme } from 'emoji-picker-react';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
@@ -32,35 +34,184 @@ const highlightText = (text: string, query: string) => {
   );
 };
 export function MainApp({ session, onLogout }: { session: any; onLogout: () => void }) {
-  const [view, setView] = useState<'feed' | 'chat'>('feed');
+  useEffect(() => {
+    socket.connect();
+    const onConnect = () => socket.emit('join', session.username);
+    socket.on('connect', onConnect);
+    if (socket.connected) onConnect();
+    return () => {
+      socket.off('connect', onConnect);
+      socket.disconnect();
+    };
+  }, [session.username]);
+  const [view, setView] = useState<'feed' | 'chat' | 'global_search'>('feed');
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const [globalSearchResults, setGlobalSearchResults] = useState<any>({ posts: [], messages: [] });
   const [searchResults, setSearchResults] = useState<any[]>([]);
-  
-  const [posts, setPosts] = useState<any[]>([]);
-  const [messages, setMessages] = useState<any[]>([]);
-  
-  const [composerText, setComposerText] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-
-  const filePreviewUrl = useMemo(() => {
-    if (file && file.type.startsWith('image/')) {
-      return URL.createObjectURL(file);
+  useEffect(() => {
+    if (searchQuery.length > 2) {
+      const timer = setTimeout(() => {
+        fetchApi(`/api/users/search?q=${encodeURIComponent(searchQuery)}`)
+          .then(setSearchResults)
+          .catch(console.error);
+      }, 300);
+      return () => clearTimeout(timer);
+    } else {
+      setSearchResults([]);
     }
-    return null;
-  }, [file]);
+  }, [searchQuery]);
+  
+  const [chats, setChats] = useState<any[]>([]);
+  
+  const fetchChats = () => {
+    fetchApi('/api/chats').then(setChats).catch(console.error);
+  };
 
   useEffect(() => {
-    return () => {
-      if (filePreviewUrl) URL.revokeObjectURL(filePreviewUrl);
+    fetchChats();
+  }, []);
+
+  useEffect(() => {
+    const handleGlobalNewMessage = (msg: any) => {
+      fetchChats();
     };
-  }, [filePreviewUrl]);
-  const [isSending, setIsSending] = useState(false);
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
+    socket.on("new_message", handleGlobalNewMessage);
+    return () => {
+      socket.off("new_message", handleGlobalNewMessage);
+    };
+  }, []);
+
+  const [posts, setPosts] = useState<any[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [storageUsage, setStorageUsage] = useState<{usageBytes: number, limitBytes: number} | null>(null);
+
+  useEffect(() => {
+    fetchApi('/api/storage/usage').then(setStorageUsage).catch(console.error);
+    const interval = setInterval(() => {
+      fetchApi('/api/storage/usage').then(setStorageUsage).catch(console.error);
+    }, 30000); // refresh every 30s
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (globalSearchQuery.length > 2) {
+      const timer = setTimeout(() => {
+        fetchApi(`/api/search?q=${encodeURIComponent(globalSearchQuery)}`)
+          .then(setGlobalSearchResults)
+          .catch(console.error);
+      }, 300);
+      return () => clearTimeout(timer);
+    } else {
+      setGlobalSearchResults({ posts: [], messages: [] });
+    }
+  }, [globalSearchQuery]);
+
+  useEffect(() => {
+    fetchApi("/api/posts").then(setPosts).catch(console.error);
+    socket.on("new_post", (post) => setPosts((p) => [post, ...p]));
+    socket.on("delete_post", (id) => setPosts((p) => p.filter((x) => x.id !== id)));
+    return () => {
+      socket.off("new_post");
+      socket.off("delete_post");
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeChat) return;
+    fetchApi(`/api/messages/${activeChat}`).then(setMessages).catch(console.error);
+    const handleNewMessage = (msg: any) => {
+      console.log('Received new_message:', msg, 'activeChat:', activeChat);
+      if (msg.senderUsername === activeChat || msg.receiverUsername === activeChat) {
+        setMessages((m) => {
+          if (m.find((x) => x.id === msg.id)) return m;
+          return [...m, msg];
+        });
+      }
+    };
+    const handleReaction = ({ messageId, username, emoji, removed }: any) => {
+      setMessages((m) =>
+        m.map((msg) => {
+          if (msg.id !== messageId) return msg;
+          const reactions = msg.reactions || [];
+          if (removed) {
+            return { ...msg, reactions: reactions.filter((r: any) => !(r.username === username && r.emoji === emoji)) };
+          } else {
+            return { ...msg, reactions: [...reactions, { username, emoji }] };
+          }
+        })
+      );
+    };
+    
+    const handleMessagesSeen = ({ by, seenAt }: any) => {
+      setMessages((m) => m.map(msg => {
+        if (msg.senderUsername === session.username && msg.receiverUsername === by && msg.status !== 'seen') {
+          return { ...msg, status: 'seen', seenAt };
+        }
+        return msg;
+      }));
+    };
+    
+    const handleStatusUpdate = ({ messageId, status }: any) => {
+      setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, status } : msg));
+    };
+
+    const handleMessagePinned = ({ messageId, isPinned }: any) => {
+      setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, isPinned } : msg));
+    };
+
+    socket.on("new_message", handleNewMessage);
+    socket.on("message_reaction", handleReaction);
+    socket.on("messages_seen", handleMessagesSeen);
+    socket.on("message_status_update", handleStatusUpdate);
+    socket.on("message_pinned", handleMessagePinned);
+    return () => {
+      socket.off("new_message", handleNewMessage);
+      socket.off("message_reaction", handleReaction);
+      socket.off("messages_seen", handleMessagesSeen);
+      socket.off("message_status_update", handleStatusUpdate);
+      socket.off("message_pinned", handleMessagePinned);
+    };
+  }, [activeChat]);
+
+  useEffect(() => {
+    const handleTyping = ({ from, avatar, color }: any) => {
+      if (view === "chat" && from === activeChat) {
+        setTypingUsers((prev) => {
+          if (prev.find((u) => u.username === from)) return prev;
+          return [...prev, { username: from, avatar, color }];
+        });
+      }
+    };
+    const handleStopTyping = ({ from }: any) => {
+      setTypingUsers((prev) => prev.filter((u) => u.username !== from));
+    };
+    socket.on("typing", handleTyping);
+    socket.on("stop_typing", handleStopTyping);
+    return () => {
+      socket.off("typing", handleTyping);
+      socket.off("stop_typing", handleStopTyping);
+    };
+  }, [view, activeChat]);
+
+  
+  const [file, setFile] = useState<File | null>(null);
+
   const [typingUsers, setTypingUsers] = useState<{username: string, avatar: string, color: string}[]>([]);
   const [isTyping, setIsTyping] = useState(false);
-  const [viewingImage, setViewingImage] = useState<string | null>(null);
+  const [viewingFile, setViewingFile] = useState<{url: string, type: string, name: string} | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(true);
+
+  useEffect(() => {
+    if (viewingFile) {
+      setIsPreviewLoading(true);
+      if (!viewingFile.type?.startsWith('image/') && viewingFile.type !== 'application/pdf' && !viewingFile.type?.startsWith('video/') && !viewingFile.type?.startsWith('audio/')) {
+        setIsPreviewLoading(false);
+      }
+    }
+  }, [viewingFile]);
   
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
   const [isAudioPaused, setIsAudioPaused] = useState(false);
@@ -72,9 +223,11 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
   const audioChunksRef = useRef<BlobPart[]>([]);
 
   const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [cropImageSrc, setCropImageSrc] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
 
+  const [activeThread, setActiveThread] = useState<any | null>(null);
   const [activeReactionMsg, setActiveReactionMsg] = useState<string | null>(null);
   const [quickEmojis, setQuickEmojis] = useState<string[]>(() => {
     const saved = localStorage.getItem('quickEmojis');
@@ -85,6 +238,147 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
   const [activeReactionMsgFull, setActiveReactionMsgFull] = useState<string | null>(null);
   const [activeMenuMsg, setActiveMenuMsg] = useState<string | null>(null);
   const [isCustomizing, setIsCustomizing] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if ((view === 'chat' || activeThread) && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, view, activeThread]);
+
+  const togglePin = async (messageId: string) => {
+    try {
+      await fetchApi(`/api/messages/${messageId}/pin`, {
+        method: 'POST',
+      });
+    } catch (err) {
+      console.error('Failed to pin:', err);
+    }
+  };
+
+  const toggleReaction = async (messageId: string, emoji: string) => {
+    try {
+      await fetchApi(`/api/messages/${messageId}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (err) {
+      console.error('Failed to react:', err);
+    }
+  };
+
+  const closeCamera = () => {
+    setIsCameraOpen(false);
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(t => t.stop());
+      setCameraStream(null);
+    }
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current) {
+      const canvas = document.createElement('canvas');
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0);
+        canvas.toBlob((blob) => {
+          if (blob) {
+            const url = URL.createObjectURL(blob);
+            setCropImageSrc(url);
+          }
+        }, 'image/jpeg', 0.9);
+      }
+    }
+  };
+
+  const deletePost = async (postId: string) => {
+    try {
+      await fetchApi(`/api/posts/${postId}`, { method: 'DELETE' });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleDiscardAudio = () => {
+    isDiscardingAudioRef.current = true;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (audioStream) {
+      audioStream.getTracks().forEach(t => t.stop());
+      setAudioStream(null);
+    }
+    setIsRecordingAudio(false);
+    setAudioDraft(null);
+  };
+
+  const handlePauseResumeAudio = () => {
+    if (mediaRecorderRef.current) {
+      if (isAudioPaused) {
+        mediaRecorderRef.current.resume();
+        setIsAudioPaused(false);
+      } else {
+        mediaRecorderRef.current.pause();
+        setIsAudioPaused(true);
+      }
+    }
+  };
+
+  const handleMicClick = async () => {
+    if (isRecordingAudio) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      return;
+    }
+    
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setAudioStream(stream);
+      setIsRecordingAudio(true);
+      setIsAudioPaused(false);
+      audioChunksRef.current = [];
+      
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+      
+      mediaRecorder.onstop = () => {
+        if (isDiscardingAudioRef.current) {
+          isDiscardingAudioRef.current = false;
+          return;
+        }
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        setAudioDraft(audioBlob);
+        setIsRecordingAudio(false);
+        stream.getTracks().forEach(t => t.stop());
+        setAudioStream(null);
+      };
+      
+      mediaRecorder.start(100);
+    } catch (err) {
+      console.error("Error accessing mic:", err);
+    }
+  };
+
+  const openCustomCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      setCameraStream(stream);
+      setIsCameraOpen(true);
+    } catch (e) {
+      console.error("Camera access denied", e);
+    }
+  };
 
 
 
@@ -124,342 +418,18 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     }
   }, [isCameraOpen, cameraStream]);
 
-  const handleDriveClick = async () => {
-    setIsMenuOpen(false);
-    try {
-      let token = await getAccessToken();
-      if (!token) {
-        const result = await googleSignIn();
-        if (result) token = result.accessToken;
-      }
-      if (token) {
-        openPicker(token, (pickedFile) => {
-          const fakeFile = new File([""], pickedFile.name, { type: pickedFile.mimeType });
-          setFile(fakeFile);
-        });
-      }
-    } catch (err) {
-      console.error("Drive error:", err);
-      alert("Failed to connect to Google Drive.");
-    }
-  };
 
-  const openCustomCamera = async () => {
-    setIsMenuOpen(false);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      setCameraStream(stream);
-      setIsCameraOpen(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch (err: any) {
-      if (err?.name === 'NotAllowedError' || err?.message?.includes('Permission') || err?.message?.includes('denied')) {
-        alert("Camera access was denied. Please allow camera access to capture photos.");
-      } else {
-        alert("Could not access camera. Please check your device permissions.");
-      }
-    }
-  };
-
-  const closeCamera = () => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
-    setIsCameraOpen(false);
-  };
-
-  const capturePhoto = () => {
-    if (videoRef.current) {
-      const canvas = document.createElement('canvas');
-      const width = videoRef.current.videoWidth || 640;
-      const height = videoRef.current.videoHeight || 480;
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, width, height);
-        canvas.toBlob((blob) => {
-          if (blob) {
-            const capturedFile = new File([blob], "camera_capture.jpg", { type: 'image/jpeg' });
-            setFile(capturedFile);
-            closeCamera();
-          }
-        }, 'image/jpeg');
-      }
-    }
-  };
-
-
-  const handleDiscardAudio = () => {
-    if (isRecordingAudio) {
-      isDiscardingAudioRef.current = true;
-      mediaRecorderRef.current?.stop();
-      setIsRecordingAudio(false);
-      setIsAudioPaused(false);
-      setAudioStream(null);
-    }
-  };
-
-  
-  const handlePauseResumeAudio = () => {
-    if (isRecordingAudio && mediaRecorderRef.current) {
-      if (isAudioPaused) {
-        mediaRecorderRef.current.resume();
-        setIsAudioPaused(false);
-      } else {
-        mediaRecorderRef.current.pause();
-        setIsAudioPaused(true);
-      }
-    }
-  };
-
-  const handleMicClick = async () => {
-    if (isRecordingAudio) {
-      mediaRecorderRef.current?.stop();
-      setIsRecordingAudio(false);
-      setIsAudioPaused(false);
-      setAudioStream(null);
-    } else {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        setAudioStream(stream);
-        const mediaRecorder = new MediaRecorder(stream);
-        mediaRecorderRef.current = mediaRecorder;
-        audioChunksRef.current = [];
-
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            audioChunksRef.current.push(event.data);
-          }
-        };
-
-        mediaRecorder.onstop = () => {
-          if (isDiscardingAudioRef.current) {
-            isDiscardingAudioRef.current = false;
-            stream.getTracks().forEach(track => track.stop());
-            return;
-          }
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          setAudioDraft(audioBlob);
-          stream.getTracks().forEach(track => track.stop());
-        };
-
-        mediaRecorder.start();
-        setIsRecordingAudio(true);
-      } catch (error: any) {
-        if (error?.name === 'NotAllowedError' || error?.message?.includes('Permission') || error?.message?.includes('denied')) {
-          alert("Microphone access was denied. Please allow microphone access to record audio.");
-        } else {
-          alert("Could not access microphone: " + (error?.message || "Unknown error"));
-        }
-      }
-    }
-  };
-
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  useEffect(() => {
-    if (view === 'chat') {
-      scrollToBottom();
-    }
-  }, [messages, view]);
-
-  // Handle keyboard opening (which triggers a window resize on many mobile browsers)
-  useEffect(() => {
-    const handleResize = () => {
-      if (view === 'chat') {
-        scrollToBottom();
-      }
-    };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [view]);
-
-  useEffect(() => {
-    socket.connect();
-    socket.emit('join', session.username);
-
-    fetchApi('/api/posts').then(setPosts);
-
-    socket.on('new_post', (post) => {
-      setPosts(prev => [post, ...prev]);
-    });
-
-    socket.on('delete_post', (postId) => {
-      setPosts(prev => prev.filter(p => p.id !== postId));
-    });
-
-    socket.on('new_message', (msg) => {
-      if (activeChat && (msg.senderUsername === activeChat || msg.receiverUsername === activeChat)) {
-        setMessages(prev => [...prev, msg]);
-      }
-      
-      if (msg.receiverUsername === session.username) {
-        if (view === 'chat' && activeChat === msg.senderUsername) {
-          socket.emit('messages_seen', { from: session.username, to: msg.senderUsername });
-        } else {
-          socket.emit('message_delivered', { messageId: msg.id, senderUsername: msg.senderUsername });
-        }
-      }
-    });
-
-    socket.on('message_status_update', ({ messageId, status }) => {
-      setMessages(prev => prev.map(msg => 
-        msg.id === messageId ? { ...msg, status } : msg
-      ));
-    });
-
-    socket.on('messages_seen', ({ by }) => {
-      setMessages(prev => prev.map(msg => 
-        (msg.receiverUsername === by && msg.senderUsername === session.username && msg.status !== 'seen') 
-          ? { ...msg, status: 'seen' } 
-          : msg
-      ));
-    });
-
-    socket.on('message_reaction', (reactionData) => {
-      setMessages(prev => prev.map(msg => {
-        if (msg.id === reactionData.messageId) {
-          const newReactions = msg.reactions || [];
-          if (reactionData.removed) {
-            return { ...msg, reactions: newReactions.filter((r: any) => !(r.username === reactionData.username && r.emoji === reactionData.emoji)) };
-          } else {
-            return { ...msg, reactions: [...newReactions, reactionData] };
-          }
-        }
-        return msg;
-      }));
-    });
-
-    socket.on('typing', (data) => {
-      setTypingUsers(prev => {
-        if (!prev.find(u => u.username === data.username)) {
-          return [...prev, { username: data.username, avatar: data.avatar, color: data.color }];
-        }
-        return prev;
-      });
-    });
-
-    socket.on('stop_typing', (data) => {
-      setTypingUsers(prev => prev.filter(u => u.username !== data.username));
-    });
-
-    return () => {
-      socket.disconnect();
-      socket.off('new_post');
-      socket.off('delete_post');
-      socket.off('new_message');
-      socket.off('message_reaction');
-      socket.off('message_status_update');
-      socket.off('messages_seen');
-      socket.off('typing');
-      socket.off('stop_typing');
-    };
-  }, [session, activeChat, view]);
-
-  useEffect(() => {
-    if (activeChat) {
-      fetchApi(`/api/messages/${activeChat}`).then(setMessages);
-    }
-  }, [activeChat]);
-
-  useEffect(() => {
-    if (searchQuery.length > 2) {
-      const delay = setTimeout(() => {
-        fetchApi(`/api/users/search?q=${encodeURIComponent(searchQuery)}`).then(res => { console.log('Search results:', res); setSearchResults(res); }).catch(err => console.error('Search error:', err));
-      }, 300);
-      return () => clearTimeout(delay);
-    } else {
-      setSearchResults([]);
-    }
-  }, [searchQuery]);
-
-  const handleSend = async () => {
-    if (!composerText.trim() && !file) return;
-    setIsSending(true);
-    
-    const formData = new FormData();
-    if (composerText) formData.append('content', composerText);
-    if (file) formData.append('file', file);
-
-    try {
-      if (view === 'feed') {
-        await fetchApi('/api/posts', {
-          method: 'POST',
-          body: formData,
-        });
-      } else if (view === 'chat' && activeChat) {
-        await fetchApi(`/api/messages/${activeChat}`, {
-          method: 'POST',
-          body: formData,
-        });
-      }
-      setComposerText('');
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
-      setFile(null);
-      if (view === 'chat' && activeChat && isTyping) {
-        setIsTyping(false);
-        socket.emit('stop_typing', { from: session.username, to: activeChat });
-        clearTimeout((window as any).typingTimeout);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsSending(false);
-    }
-  };
-
-  const deletePost = async (id: string) => {
-    await fetchApi(`/api/posts/${id}`, { method: 'DELETE' });
-  };
-
-  const toggleReaction = async (messageId: string, emoji: string) => {
-    try {
-      await fetchApi(`/api/messages/${messageId}/react`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ emoji })
-      });
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleComposerChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setComposerText(e.target.value);
-    
-    // Auto-resize
-    e.target.style.height = 'auto';
-    e.target.style.height = `${Math.min(e.target.scrollHeight, 128)}px`;
-    
-    if (view === 'chat' && activeChat) {
-      if (!isTyping) {
-        setIsTyping(true);
-        socket.emit('typing', { from: session.username, to: activeChat, avatar: session.avatar, color: session.color });
-      }
-      
-      clearTimeout((window as any).typingTimeout);
-      (window as any).typingTimeout = setTimeout(() => {
-        setIsTyping(false);
-        socket.emit('stop_typing', { from: session.username, to: activeChat });
-      }, 2000);
-    }
-  };
-
-  const openChat = (username: string) => {
+  const openChat = (username: string, color?: string, avatar?: string) => {
     setActiveChat(username);
     setView('chat');
+    setActiveThread(null);
     setSearchQuery('');
     setChatSearchQuery('');
+    
+    setChats(prev => {
+      if (prev.find(c => c.username === username)) return prev;
+      return [{ username, color: color || 'bg-neutral-500', avatar: avatar || '👤' }, ...prev].slice(0, 20);
+    });
   };
 
   return (
@@ -475,7 +445,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
             className="fixed inset-0 z-[100] bg-black flex flex-col"
           >
             <div className="flex justify-between items-center p-4 bg-gradient-to-b from-black/50 to-transparent absolute top-0 left-0 right-0 z-10">
-              <button onClick={closeCamera} className="text-white p-2">
+              <button aria-label="Close camera" onClick={closeCamera} className="text-white p-2">
                 <X className="w-6 h-6" />
               </button>
             </div>
@@ -491,6 +461,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
             <div className="p-8 bg-gradient-to-t from-black/80 to-transparent absolute bottom-0 left-0 right-0 flex justify-center items-center">
               <button 
+                aria-label="Capture photo"
                 onClick={capturePhoto}
                 className="w-16 h-16 rounded-full border-4 border-white/50 bg-white/20 hover:bg-white hover:border-white transition-all flex items-center justify-center group"
               >
@@ -500,6 +471,21 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           </motion.div>
         )}
       </AnimatePresence>
+
+      {cropImageSrc && (
+        <ImageCropper
+          imageSrc={cropImageSrc}
+          onCropComplete={(f) => {
+            setFile(f);
+            setCropImageSrc(null);
+            closeCamera();
+          }}
+          onCancel={() => {
+            setCropImageSrc(null);
+          }}
+        />
+      )}
+
       <div className="h-screen w-full bg-neutral-950 text-white flex flex-col md:flex-row overflow-hidden">
       {/* Sidebar / Topbar */}
       <div className={clsx(
@@ -518,7 +504,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               </div>
             </div>
           </div>
-          <button onClick={onLogout} className="p-2 text-neutral-400 hover:text-white transition-colors">
+          <button aria-label="Logout" onClick={onLogout} className="p-2 text-neutral-400 hover:text-white transition-colors">
             <LogOut className="w-5 h-5" />
           </button>
         </div>
@@ -539,7 +525,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                   searchResults.map(res => (
                     <button 
                       key={res.username}
-                      onClick={() => openChat(res.username)}
+                      onClick={() => openChat(res.username, res.color, res.avatar)}
                       className="w-full text-left px-4 py-3 hover:bg-white/5 flex items-center space-x-3 transition-colors"
                     >
                       <div className={clsx("w-8 h-8 rounded-full flex flex-shrink-0 items-center justify-center text-sm", res.color)}>
@@ -564,22 +550,43 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
         <nav className="p-2 space-y-1">
           <button 
-            onClick={() => setView('feed')}
+            onClick={() => { setView('feed'); setActiveThread(null); }}
             className={clsx("w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-colors", view === 'feed' ? "bg-white/10 text-white" : "text-neutral-400 hover:bg-white/5 hover:text-white")}
           >
             <Globe className="w-5 h-5" />
             <span className="font-medium">Public Feed</span>
           </button>
-          {activeChat && (
+          {chats.map((chat: any) => (
             <button 
-              onClick={() => setView('chat')}
-              className={clsx("w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-colors", view === 'chat' ? "bg-white/10 text-white" : "text-neutral-400 hover:bg-white/5 hover:text-white")}
+              key={chat.username}
+              onClick={() => { openChat(chat.username, chat.color, chat.avatar); }}
+              className={clsx("w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-colors", view === 'chat' && activeChat === chat.username ? "bg-white/10 text-white" : "text-neutral-400 hover:bg-white/5 hover:text-white")}
             >
-              <div className="w-5 h-5 rounded-full bg-neutral-700 flex items-center justify-center text-[10px]">💬</div>
-              <span className="font-medium truncate">{activeChat}</span>
+              <div className={clsx("w-6 h-6 rounded-full flex flex-shrink-0 items-center justify-center text-[10px]", chat.color)}>
+                {chat.avatar}
+              </div>
+              <span className="font-medium truncate">{chat.username}</span>
             </button>
-          )}
+          ))}
         </nav>
+        
+        {storageUsage && (
+          <div className="p-4 mt-auto border-t border-white/5">
+            <div className="flex items-center justify-between text-xs text-neutral-400 mb-2">
+              <span>Storage (25GB)</span>
+              <span>{(storageUsage.usageBytes / (1024 * 1024 * 1024)).toFixed(2)} GB used</span>
+            </div>
+            <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+              <div 
+                className={clsx(
+                  "h-full transition-all duration-500",
+                  (storageUsage.usageBytes / storageUsage.limitBytes) > 0.9 ? "bg-red-500" : "bg-blue-500"
+                )} 
+                style={{ width: `${Math.min(100, (storageUsage.usageBytes / storageUsage.limitBytes) * 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main Content Area */}
@@ -590,38 +597,114 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         {/* Header */}
         <header className="h-16 flex items-center justify-between px-4 md:px-6 border-b border-white/10 flex-shrink-0 bg-neutral-900/50 backdrop-blur-md sticky top-0 z-10">
           <div className="flex items-center">
-            {view === 'chat' && (
+            {(view === 'chat' || activeThread) && (
               <button 
-                onClick={() => setView('feed')}
-                className="md:hidden mr-3 p-2 hover:bg-white/10 text-neutral-400 hover:text-white rounded-full transition-colors"
+                aria-label={activeThread ? "Back to chat" : "Back to feed"}
+                onClick={() => { if (activeThread) setActiveThread(null); else { setView('feed'); setActiveThread(null); } }}
+                className={clsx("mr-3 p-2 hover:bg-white/10 text-neutral-400 hover:text-white rounded-full transition-colors", !activeThread && "md:hidden")}
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
                 </svg>
               </button>
             )}
-            <h2 className="text-lg font-semibold">
-              {view === 'feed' ? 'Public Feed' : `Chat with ${activeChat}`}
-            </h2>
+            <div className="flex flex-col">
+              <h2 className="text-lg font-semibold leading-tight">
+                {activeThread ? 'Thread' : view === 'feed' ? 'Public Feed' : `Chat with ${activeChat}`}
+              </h2>
+              {view === 'chat' && typingUsers.length > 0 && (
+                <span className="text-[13px] text-blue-400 font-medium animate-pulse mt-0.5">
+                  {typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing...
+                </span>
+              )}
+            </div>
           </div>
           
-          {view === 'chat' && (
-            <div className="relative w-48 md:w-64">
+          <div className="relative w-48 md:w-64">
               <Search className="absolute left-3 top-2 w-4 h-4 text-neutral-500" />
               <input
                 type="text"
-                placeholder="Search messages..."
-                value={chatSearchQuery}
-                onChange={(e) => setChatSearchQuery(e.target.value)}
+                placeholder="Global Search..."
+                value={globalSearchQuery}
+                onChange={(e) => {
+                  setGlobalSearchQuery(e.target.value);
+                  if (e.target.value) setView('global_search');
+                  else if (view === 'global_search') setView(activeChat ? 'chat' : 'feed');
+                }}
                 className="w-full bg-white/5 border border-white/10 rounded-full pl-9 pr-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-white/20 transition-all text-sm"
               />
             </div>
-          )}
         </header>
+
+        {/* Pinned Messages Banner */}
+        {view === 'chat' && !activeThread && messages.filter((m: any) => !m.parentId && m.isPinned).length > 0 && (
+          <div className="flex-shrink-0 bg-neutral-900 border-b border-white/10 p-2 md:px-6 sticky top-0 z-10 shadow-md">
+            <div className="flex space-x-2 overflow-x-auto pb-1 scrollbar-hide">
+              {messages.filter((m: any) => !m.parentId && m.isPinned).map((msg: any) => (
+                <div key={msg.id} className="flex flex-col bg-neutral-800/50 rounded-lg p-2 min-w-[200px] max-w-[250px] flex-shrink-0 border border-white/5 cursor-pointer hover:bg-neutral-800 transition-colors group relative" onClick={() => {
+                  const el = document.getElementById(`msg-${msg.id}`);
+                  if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    el.classList.add('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950', 'transition-all');
+                    setTimeout(() => el.classList.remove('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950'), 2000);
+                  }
+                }}>
+                  <button 
+                    className="absolute top-1 right-1 p-1 opacity-0 group-hover:opacity-100 hover:bg-white/10 rounded-md transition-all text-neutral-400 hover:text-white"
+                    onClick={(e) => { e.stopPropagation(); togglePin(msg.id); }}
+                    title="Unpin"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                  <div className="flex items-center space-x-1 text-blue-400 mb-1">
+                    <Pin className="w-3 h-3 fill-current rotate-45" />
+                    <span className="text-[10px] font-medium uppercase tracking-wider">Pinned by {msg.senderUsername}</span>
+                  </div>
+                  <div className="text-xs text-neutral-300 truncate">
+                    {msg.content || (msg.fileName ? `File: ${msg.fileName}` : 'Pinned message')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Scrollable Area */}
         <div className="flex-1 overflow-y-auto px-4 md:px-6 pt-6 pb-24 space-y-6" onClick={() => setActiveMenuMsg(null)} onScroll={() => setActiveMenuMsg(null)}>
-          {view === 'feed' ? (
+          {view === 'global_search' ? (
+            <div className="flex flex-col space-y-6 max-w-2xl mx-auto">
+              <h3 className="text-lg font-medium text-white">Search Results</h3>
+              {globalSearchResults.messages.length > 0 && (
+                <div className="space-y-4">
+                  <h4 className="text-sm font-semibold text-neutral-400">Messages</h4>
+                  {globalSearchResults.messages.map((msg: any) => (
+                    <div key={msg.id} className="bg-neutral-900 border border-white/10 rounded-xl p-4 cursor-pointer hover:bg-neutral-800 transition-colors" onClick={() => { setActiveChat(msg.senderUsername === session.username ? msg.receiverUsername : msg.senderUsername); setView('chat'); setGlobalSearchQuery(''); }}>
+                      <div className="text-xs text-neutral-500 mb-1">
+                        {msg.senderUsername === session.username ? 'You' : msg.senderUsername} to {msg.receiverUsername === session.username ? 'You' : msg.receiverUsername}
+                      </div>
+                      <div className="text-sm">{msg.content}</div>
+                      {msg.fileName && <div className="text-xs text-blue-400 mt-1">{msg.fileName}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {globalSearchResults.posts.length > 0 && (
+                <div className="space-y-4">
+                  <h4 className="text-sm font-semibold text-neutral-400">Feed Posts</h4>
+                  {globalSearchResults.posts.map((post: any) => (
+                    <div key={post.id} className="bg-neutral-900 border border-white/10 rounded-xl p-4 cursor-pointer hover:bg-neutral-800 transition-colors" onClick={() => { setView('feed'); setGlobalSearchQuery(''); }}>
+                      <div className="text-xs text-neutral-500 mb-1">Posted by {post.username}</div>
+                      <div className="text-sm">{post.content}</div>
+                      {post.fileName && <div className="text-xs text-blue-400 mt-1">{post.fileName}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {globalSearchResults.posts.length === 0 && globalSearchResults.messages.length === 0 && (
+                <div className="text-neutral-500 text-center py-8">No results found for "{globalSearchQuery}"</div>
+              )}
+            </div>
+          ) : view === 'feed' ? (
             <div className="space-y-6 max-w-2xl mx-auto">
               {posts.map((post) => (
                 <DissolvingItem 
@@ -645,6 +728,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     </div>
                     {post.sessionId === session.id && (
                       <button 
+                        aria-label="Delete post"
                         onClick={() => deletePost(post.id)}
                         className="opacity-0 group-hover:opacity-100 p-2 hover:bg-red-500/20 text-red-400 rounded-full transition-all"
                       >
@@ -658,7 +742,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                   {post.fileUrl && (
                     <div className="rounded-xl overflow-hidden bg-neutral-950 border border-white/5">
                       {post.fileType?.startsWith('image/') ? (
-                        <img src={post.fileUrl} alt="attachment" className="w-full max-h-96 object-cover cursor-pointer" onClick={() => setViewingImage(post.fileUrl)} />
+                        <img loading="lazy" src={post.fileUrl} alt="attachment" className="w-full max-h-96 object-cover cursor-pointer" onClick={() => setViewingFile({ url: post.fileUrl, type: post.fileType, name: post.fileName })} />
                       ) : post.fileType?.startsWith('audio/') ? (
                         <div className="p-4">
                           <AudioPlayer src={post.fileUrl} />
@@ -668,7 +752,10 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           <div className="p-3 bg-white/5 rounded-lg">
                             <Globe className="w-6 h-6" />
                           </div>
-                          <a href={post.fileUrl} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">{post.fileName}</a>
+                          <button onClick={() => setViewingFile({ url: post.fileUrl, type: post.fileType, name: post.fileName })} className="text-blue-400 hover:underline flex items-center space-x-2 text-left">
+                              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                              <span className="truncate">{post.fileName}</span>
+                            </button>
                         </div>
                       )}
                     </div>
@@ -681,8 +768,14 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
             </div>
           ) : (
             <div className="flex flex-col space-y-4 max-w-3xl mx-auto">
-              {messages.filter(msg => msg.content?.toLowerCase().includes(chatSearchQuery.toLowerCase()) || msg.fileName?.toLowerCase().includes(chatSearchQuery.toLowerCase())).map((msg) => {
+              {(() => {
+                const displayedMessages = activeThread
+                  ? [activeThread, ...messages.filter((m: any) => m.parentId === activeThread.id)]
+                  : messages.filter((msg: any) => !msg.parentId && (chatSearchQuery === '' || msg.content?.toLowerCase().includes(chatSearchQuery.toLowerCase()) || msg.fileName?.toLowerCase().includes(chatSearchQuery.toLowerCase())));
+                return displayedMessages.map((msg: any) => {
                 const isMe = msg.senderUsername === session.username;
+                const isThreadParent = activeThread?.id === msg.id;
+                const replyCount = messages.filter((m: any) => m.parentId === msg.id).length;
                 
                 // Group reactions by emoji
                 const reactionCounts: Record<string, { count: number, reacted: boolean }> = {};
@@ -695,7 +788,11 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                 return (
                   <DissolvingItem 
                     key={msg.id} 
+                    id={`msg-${msg.id}`}
                     expiresAt={msg.expiresAt}
+                    initial={{ opacity: 0, x: isMe ? 20 : -20, scale: 0.95 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    transition={{ duration: 0.3, ease: 'easeOut' }}
                     className={clsx("flex flex-col max-w-[80%] group", isMe ? "self-end items-end" : "self-start items-start")}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -717,11 +814,14 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         {msg.fileUrl && (
                           <div className="mt-2 rounded-lg overflow-hidden">
                             {msg.fileType?.startsWith('image/') ? (
-                              <img src={msg.fileUrl} alt="attachment" className="max-w-full rounded-md cursor-pointer" onClick={() => setViewingImage(msg.fileUrl)} />
+                              <img loading="lazy" src={msg.fileUrl} alt="attachment" className="max-w-full rounded-md cursor-pointer" onClick={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })} />
                             ) : msg.fileType?.startsWith('audio/') ? (
                               <AudioPlayer src={msg.fileUrl} />
                             ) : (
-                              <a href={msg.fileUrl} target="_blank" rel="noreferrer" className="underline opacity-80">{msg.fileName}</a>
+                              <button onClick={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })} className="underline opacity-80 hover:opacity-100 flex items-center space-x-2 text-left">
+                                <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                <span className="truncate">{msg.fileName}</span>
+                              </button>
                             )}
                           </div>
                         )}
@@ -734,7 +834,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           {Array.from(new Set(quickEmojis)).slice(0, 6).map((emoji: any) => (
                             <button 
                               key={emoji}
-                              onClick={() => { toggleReaction(msg.id, emoji); setActiveMenuMsg(null); }}
+                              aria-label={`React with ${emoji}`}
+                              onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, emoji); setActiveMenuMsg(null); }}
                               className="w-9 h-9 flex items-center justify-center hover:bg-white/5 rounded-full text-[22px] transition-transform hover:scale-110 active:scale-75 transform"
                             >
                               {emoji}
@@ -742,7 +843,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           ))}
                           <div className="w-[1px] h-6 bg-white/10 mx-1.5"></div>
                           <button 
-                            onClick={() => { setActiveReactionMsgFull(msg.id); setIsCustomizing(false); setActiveMenuMsg(null); }}
+                            aria-label="More reactions"
+                            onClick={(e) => { e.stopPropagation(); setActiveReactionMsgFull(msg.id); setIsCustomizing(false); setActiveMenuMsg(null); }}
                             className="w-9 h-9 flex items-center justify-center bg-white/10 hover:bg-white/20 rounded-full text-neutral-400 hover:text-white transition-colors ml-0.5"
                           >
                             <Plus className="w-5 h-5" />
@@ -753,6 +855,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         
                         {msg.content && (
                           <button 
+                            aria-label="Copy message text"
                             onClick={() => navigator.clipboard.writeText(msg.content)}
                             className="p-1.5 text-neutral-500 hover:text-white bg-neutral-900 rounded-full shadow-md border border-white/10 transition-colors"
                             title="Copy message text"
@@ -760,6 +863,14 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             <Copy className="w-4 h-4" />
                           </button>
                         )}
+                        <button 
+                          aria-label={msg.isPinned ? "Unpin message" : "Pin message"}
+                          onClick={() => togglePin(msg.id)}
+                          className={clsx("p-1.5 rounded-full shadow-md border border-white/10 transition-colors", msg.isPinned ? "text-blue-400 bg-blue-900/20 border-blue-500/30" : "text-neutral-500 hover:text-white bg-neutral-900")}
+                          title={msg.isPinned ? "Unpin message" : "Pin message"}
+                        >
+                          {msg.isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+                        </button>
                       </div>
                     </div>
 
@@ -769,7 +880,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         {Object.entries(reactionCounts).map(([emoji, { count, reacted }]) => (
                           <button
                             key={emoji}
-                            onClick={() => { toggleReaction(msg.id, emoji); setActiveMenuMsg(null); }}
+                            aria-label={`React with ${emoji}`}
+                            onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, emoji); setActiveMenuMsg(null); }}
                             className={clsx(
                               "flex items-center space-x-1 text-[11px] px-2 py-0.5 rounded-full border border-white/10 transition-transform active:scale-90",
                               reacted ? "bg-white/20 text-white" : "bg-neutral-900 text-neutral-300 hover:bg-white/10"
@@ -783,13 +895,33 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     )}
 
                     <div className="text-[10px] text-neutral-500 mt-1 flex items-center space-x-1.5">
+                      {msg.isPinned && (
+                        <div className="flex items-center text-blue-400" title="Pinned message">
+                          <Pin className="w-3 h-3 fill-current rotate-45" />
+                        </div>
+                      )}
                       <span>{new Date(msg.createdAt.replace(' ', 'T') + (!msg.createdAt.endsWith('Z') ? 'Z' : '')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      {!activeThread && replyCount > 0 && (
+                        <>
+                          <span>•</span>
+                          <button onClick={() => setActiveThread(msg)} className="text-blue-400 hover:underline">
+                            {replyCount} repl{replyCount === 1 ? 'y' : 'ies'}
+                          </button>
+                        </>
+                      )}
                       <Countdown expiresAt={msg.expiresAt} />
                       {isMe && (
                         <div className="flex items-center space-x-1 pl-0.5">
                           <AnimatePresence mode="wait" initial={false}>
                             {msg.status === 'seen' ? (
-                              <motion.div key="seen" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.2 }}>
+                              <motion.div 
+                                key="seen" 
+                                initial={{ opacity: 0, scale: 0.8 }} 
+                                animate={{ opacity: 1, scale: 1 }} 
+                                exit={{ opacity: 0, scale: 0.8 }} 
+                                transition={{ duration: 0.2 }}
+                                title={msg.seenAt ? `Read at ${new Date(msg.seenAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}` : 'Read'}
+                              >
                                 <CheckCheck className="w-3 h-3 text-blue-400" />
                               </motion.div>
                             ) : msg.status === 'delivered' ? (
@@ -807,38 +939,17 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     </div>
                   </DissolvingItem>
                 );
-              })}
+              });
+              })()}
               <div ref={messagesEndRef} />
             </div>
           )}
         </div>
 
         {/* Composer Footer */}
+        {view !== 'global_search' && (
         <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-neutral-950 via-neutral-950/90 to-transparent">
           <div className="max-w-3xl mx-auto relative">
-            {file && (
-              <div className="mb-2 relative inline-flex group items-end">
-                {filePreviewUrl ? (
-                  <div className="relative w-20 h-20 rounded-xl overflow-hidden border border-white/10 bg-neutral-900 shadow-xl ml-2">
-                    <img src={filePreviewUrl} alt="preview" className="w-full h-full object-cover" />
-                  </div>
-                ) : (
-                  <div className="w-20 h-20 bg-[#212121] border border-white/10 rounded-xl flex flex-col items-center justify-center p-2 text-center shadow-xl ml-2">
-                    <svg className="w-6 h-6 text-neutral-400 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                    </svg>
-                    <span className="text-[9px] text-neutral-300 truncate w-full px-1">{file.name}</span>
-                  </div>
-                )}
-                <button 
-                  onClick={() => setFile(null)} 
-                  className="absolute -top-2 -right-2 w-6 h-6 bg-neutral-800 text-white rounded-full flex items-center justify-center border border-white/10 hover:bg-neutral-700 transition-colors shadow-lg z-10 md:opacity-0 md:group-hover:opacity-100 transition-all active:scale-90"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-            
             <AnimatePresence>
               {audioDraft && (
                   <motion.div
@@ -870,12 +981,13 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     className="flex-1 bg-[#212121] rounded-[24px] px-1.5 py-1.5 shadow-2xl flex flex-col items-center justify-center relative overflow-hidden"
                   >
                     <div className="w-full flex items-center justify-center mb-4 px-4">
-                       <LargeAudioVisualizer stream={audioStream} />
+                       <LargeAudioVisualizer stream={audioStream} isPaused={isAudioPaused} />
                     </div>
 
                     <div className="flex items-center justify-between w-full px-6">
                       <div className="flex items-center space-x-3">
                         <button 
+                          aria-label="Discard audio"
                           onClick={handleDiscardAudio}
                           className="w-8 h-8 rounded-full bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white flex items-center justify-center transition-colors"
                         >
@@ -883,6 +995,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         </button>
 
                         <button 
+                          aria-label={isAudioPaused ? 'Resume recording' : 'Pause recording'}
                           onClick={handlePauseResumeAudio}
                           className="w-8 h-8 rounded-full bg-neutral-800 hover:bg-neutral-700 text-white flex items-center justify-center transition-colors"
                         >
@@ -897,6 +1010,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                       </div>
 
                       <button 
+                        aria-label="Finish recording"
                         onClick={handleMicClick}
                         className="w-10 h-10 bg-[#ea4335] hover:bg-[#d93025] rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95"
                       >
@@ -910,138 +1024,105 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               )}
             </AnimatePresence>
             
-            <div className="flex items-end space-x-3">
-              <div className="flex-1 flex items-end bg-[#212121] rounded-[24px] px-1.5 py-1.5 shadow-2xl relative">
-                
-                <div className="flex items-center pl-1 pr-2 pb-1.5 flex-shrink-0 self-end">
-                  <div className="relative">
-                    {/* Plus Menu Popup */}
-                    {isMenuOpen && (
-                      <div className="absolute bottom-full left-0 mb-3 w-[180px] bg-[#2f2f2f] rounded-[16px] overflow-hidden shadow-2xl z-50">
-                        <div className="py-2 flex flex-col">
-                          <button onClick={handleDriveClick} className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors">
-                            <svg viewBox="0 0 48 48" className="w-4 h-4">
-                              <path fill="#FFC107" d="M17 5.865L26.794 22.8h19.141L36.141 5.865z"/>
-                              <path fill="#1976D2" d="M11.666 14.914L2 31.66h19.245l9.666-16.746z"/>
-                              <path fill="#4CAF50" d="M36.14 43.135L26.347 26.2H7.206L17.065 43.135z"/>
-                            </svg>
-                            <span>Drive</span>
-                          </button>
-                          <label className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 cursor-pointer transition-colors">
-                            <Upload className="w-4 h-4 text-neutral-400" />
-                            <span>Upload Files</span>
-                            <input type="file" className="hidden" onChange={(e) => { setFile(e.target.files?.[0] || null); setIsMenuOpen(false); }} />
-                          </label>
-                          <button onClick={openCustomCamera} className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors">
-                            <Camera className="w-4 h-4 text-neutral-400" />
-                            <span>Camera</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <button 
-                      onClick={() => setIsMenuOpen(!isMenuOpen)}
-                      className={clsx("w-8 h-8 flex items-center justify-center rounded-full text-neutral-400 hover:text-white hover:bg-white/10 transition-colors", isMenuOpen && "bg-white/10 text-white")}
-                      title="Add files and more"
-                    >
-                      <Plus className={clsx("w-5 h-5 transition-transform", isMenuOpen && "rotate-45")} />
-                    </button>
-                  </div>
-                </div>
-
-                <textarea
-                  ref={textareaRef}
-                  rows={1}
-                  placeholder="Send Message..."
-                  value={composerText}
-                  onChange={handleComposerChange}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  className="flex-1 bg-transparent border-none focus:ring-0 text-[15px] px-1 py-2 placeholder-neutral-400 outline-none text-white resize-none min-h-[40px] max-h-32 self-center"
-                />
-
-                <div className="flex items-center space-x-1 pr-1 pb-1.5 flex-shrink-0 self-end">
-                  <button 
-                    onClick={handleMicClick}
-                    className={clsx(
-                      "p-1.5 transition-colors cursor-pointer rounded-full overflow-hidden flex items-center justify-center",
-                      "text-neutral-400 hover:text-white"
-                    )}
-                  >
-                    <Mic className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
-              <button 
-                onClick={handleSend}
-                disabled={isSending || (!composerText.trim() && !file)}
-                className="w-12 h-12 bg-white text-black hover:bg-neutral-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-colors flex-shrink-0 flex items-center justify-center shadow-lg"
-              >
-                {isSending ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : composerText.trim() || file ? (
-                  <Send className="w-5 h-5 ml-0.5" />
-                ) : (
-                  <AudioLines className="w-5 h-5" />
-                )}
-              </button>
-            </div>
-            
-            {view === 'chat' && typingUsers.length > 0 && (
-              <div className="absolute bottom-full mb-2 left-4 z-10 flex items-center space-x-2 text-[12px] text-neutral-400 bg-neutral-900/90 px-3 py-1.5 rounded-full border border-white/5 backdrop-blur-md shadow-lg">
-                <div className="flex -space-x-1.5">
-                  {typingUsers.map((user, i) => (
-                    <div 
-                      key={user.username} 
-                      className={clsx("w-5 h-5 rounded-full flex items-center justify-center text-[10px] ring-2 ring-neutral-900 relative", user.color)} 
-                      style={{ zIndex: 10 - i }}
-                    >
-                      {user.avatar}
-                    </div>
-                  ))}
-                </div>
-                <div className="flex space-x-1 ml-1">
-                  <div className="w-1 h-1 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <div className="w-1 h-1 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <div className="w-1 h-1 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                </div>
-                <span className="ml-1 opacity-80">{typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing...</span>
-              </div>
-            )}
+            <Composer 
+              view={view}
+              activeChat={activeChat}
+              parentId={activeThread?.id}
+              session={session}
+              file={file}
+              setFile={setFile}
+              openCustomCamera={openCustomCamera}
+              handleMicClick={handleMicClick}
+              setToastMessage={setToastMessage}
+            />
           </div>
         </div>
+      )}
       </div>
 
       <AnimatePresence>
-        {viewingImage && (
+        {viewingFile && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4"
-            onClick={() => setViewingImage(null)}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 md:p-8"
+            onClick={() => setViewingFile(null)}
           >
             <button
-              onClick={() => setViewingImage(null)}
-              className="absolute top-4 right-4 p-2 text-white/70 hover:text-white bg-black/50 hover:bg-black/70 rounded-full transition-colors z-10"
+              aria-label="Close preview"
+              onClick={() => setViewingFile(null)}
+              className="absolute top-4 right-4 z-10 p-2 bg-neutral-800/80 hover:bg-neutral-700/80 backdrop-blur rounded-full text-white transition-colors"
             >
-              <X className="w-6 h-6" />
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
             </button>
-            <motion.img
-              initial={{ scale: 0.9, opacity: 0 }}
+            
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
+              exit={{ scale: 0.95, opacity: 0 }}
               transition={{ type: "spring", damping: 25, stiffness: 300 }}
-              src={viewingImage}
-              alt="Full screen view"
-              className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+              className="relative w-full max-w-5xl h-full max-h-[90vh] bg-neutral-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
               onClick={(e) => e.stopPropagation()}
-            />
+            >
+              <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between bg-neutral-900/50 backdrop-blur-md">
+                <div className="font-medium truncate text-white">{viewingFile.name}</div>
+                <div className="flex items-center space-x-2">
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(viewingFile.url);
+                      setToastMessage('Link copied to clipboard');
+                      setTimeout(() => setToastMessage(null), 3000);
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded-md transition-colors flex items-center space-x-2"
+                  >
+                    <Copy className="w-4 h-4" />
+                    <span>Copy Link</span>
+                  </button>
+                  <a 
+                    href={viewingFile.url} 
+                    download={viewingFile.name}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded-md transition-colors flex items-center space-x-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                    <span>Download</span>
+                  </a>
+                </div>
+              </div>
+              <div className="flex-1 overflow-hidden bg-neutral-950 flex items-center justify-center p-4 relative">
+                {isPreviewLoading && viewingFile.type !== 'application/pdf' && !viewingFile.type?.startsWith('image/') && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-neutral-950 z-10">
+                    <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
+                  </div>
+                )}
+                {isPreviewLoading && (viewingFile.type === 'application/pdf' || viewingFile.type?.startsWith('image/')) && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-neutral-950 z-10 pointer-events-none">
+                    <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
+                  </div>
+                )}
+                {viewingFile.type?.startsWith('image/') ? (
+                  <img onLoad={() => setIsPreviewLoading(false)} src={viewingFile.url} alt={viewingFile.name} className="max-w-full max-h-full object-contain rounded" />
+                ) : viewingFile.type === 'application/pdf' ? (
+                  <iframe onLoad={() => setIsPreviewLoading(false)} src={viewingFile.url} className="w-full h-full rounded border-0 bg-white" title={viewingFile.name} />
+                ) : viewingFile.type?.startsWith('video/') ? (
+                  <video onCanPlay={() => setIsPreviewLoading(false)} src={viewingFile.url} controls className="max-w-full max-h-full" />
+                ) : viewingFile.type?.startsWith('audio/') ? (
+                  <audio onCanPlay={() => setIsPreviewLoading(false)} src={viewingFile.url} controls className="w-full max-w-md" />
+                ) : (
+                  <div className="text-center text-neutral-400" onLoad={() => setIsPreviewLoading(false)}>
+                    <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <p>No preview available for this file type.</p>
+                    <p className="text-xs mt-2 opacity-70">{viewingFile.type}</p>
+                  </div>
+                )}
+              </div>
+            </motion.div>
           </motion.div>
         )}
 
@@ -1081,6 +1162,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                   {quickEmojis.map((emoji, idx) => (
                     <button 
                       key={idx}
+                      aria-label={isCustomizing ? `Remove ${emoji} from quick reactions` : `React with ${emoji}`}
                       onClick={() => {
                         if (isCustomizing) {
                           const newEmojis = quickEmojis.filter((_, i) => i !== idx);
@@ -1139,7 +1221,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
             exit={{ opacity: 0, y: -20 }}
             className="fixed top-6 left-1/2 -translate-x-1/2 z-[200] bg-neutral-800 border border-white/10 text-white px-4 py-2 rounded-full shadow-2xl flex items-center space-x-2 text-sm"
           >
-            <Check className="w-4 h-4 text-green-400" />
+            {toastMessage.toLowerCase().includes("fail") || toastMessage.toLowerCase().includes("error") ? <X className="w-4 h-4 text-red-400" /> : <Check className="w-4 h-4 text-green-400" />}
             <span>{toastMessage}</span>
           </motion.div>
         )}

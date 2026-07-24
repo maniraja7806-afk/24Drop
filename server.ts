@@ -8,6 +8,13 @@ import fs from 'fs';
 import multer from 'multer';
 import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
+import { v2 as cloudinary } from 'cloudinary';
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 async function startServer() {
   const app = express();
@@ -19,6 +26,10 @@ async function startServer() {
 
   app.use(cors());
   app.use(express.json());
+
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok' });
+  });
 
   // Set up Database
   const dbPath = path.join(process.cwd(), 'database.db');
@@ -40,6 +51,7 @@ async function startServer() {
       color TEXT NOT NULL,
       avatar TEXT NOT NULL,
       content TEXT,
+      parentId TEXT,
       fileUrl TEXT,
       fileName TEXT,
       fileType TEXT,
@@ -53,10 +65,13 @@ async function startServer() {
       senderUsername TEXT NOT NULL,
       receiverUsername TEXT NOT NULL,
       content TEXT,
+      parentId TEXT,
       fileUrl TEXT,
       fileName TEXT,
       fileType TEXT,
       status TEXT DEFAULT 'sent',
+      isPinned BOOLEAN DEFAULT 0,
+      seenAt DATETIME,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       expiresAt DATETIME NOT NULL,
       FOREIGN KEY(senderId) REFERENCES sessions(id) ON DELETE CASCADE
@@ -71,9 +86,20 @@ async function startServer() {
       FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
     );
   `);
+  
+  // Migration for existing databases
+  try {
+    db.prepare('ALTER TABLE messages ADD COLUMN isPinned BOOLEAN DEFAULT 0').run();
+  } catch (e) {
+    // Column might already exist
+  }
 
   try {
     db.exec("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'sent'");
+  } catch(e) {}
+  
+  try {
+    db.exec("ALTER TABLE messages ADD COLUMN seenAt DATETIME");
   } catch(e) {}
 
   // Ensure uploads directory exists
@@ -88,7 +114,10 @@ async function startServer() {
     destination: (req, file, cb) => cb(null, uploadDir),
     filename: (req, file, cb) => cb(null, `${uuidv4()}-${file.originalname}`),
   });
-  const upload = multer({ storage });
+  const upload = multer({ 
+    storage,
+    limits: { fileSize: 25 * 1024 * 1024 * 1024 } // 25GB limit
+  });
 
   // --- API Routes ---
 
@@ -173,15 +202,82 @@ async function startServer() {
   app.get('/api/session', requireSession, (req: any, res: any) => {
     res.json(req.session);
   });
+  
+  // Storage usage
+  app.get('/api/storage/usage', requireSession, async (req: any, res: any) => {
+    try {
+      if (!process.env.CLOUDINARY_CLOUD_NAME) {
+        return res.json({ usageBytes: 0, limitBytes: 25 * 1024 * 1024 * 1024 });
+      }
+      const usage = await cloudinary.api.usage();
+      // Cloudinary storage usage is in bytes, limits are in credits (1 credit = 1GB)
+      const usageBytes = usage.storage.usage || 0;
+      const limitBytes = 25 * 1024 * 1024 * 1024; // 25GB
+      res.json({ usageBytes, limitBytes });
+    } catch (err) {
+      console.error('Failed to fetch cloudinary usage:', err);
+      res.status(500).json({ error: 'Failed to fetch storage usage' });
+    }
+  });
 
   // Search users
   app.get('/api/users/search', requireSession, (req: any, res: any) => {
     const query = req.query.q;
     if (!query) return res.json([]);
-    const stmt = db.prepare("SELECT username, color, avatar, expiresAt FROM sessions WHERE username LIKE ? AND username != ? LIMIT 10");
-    const users = stmt.all(`%${query}%`, req.session.username);
+    const stmt = db.prepare("SELECT username, color, avatar, expiresAt FROM sessions WHERE username LIKE ? COLLATE NOCASE LIMIT 10");
+    const users = stmt.all(`%${query}%`);
     console.log('Search query:', query, 'Result length:', users.length);
     res.json(users);
+  });
+
+  app.get('/api/chats', requireSession, (req: any, res: any) => {
+    const session = req.session;
+    
+    // Get unique partners sorted by the latest message time
+    const partners = db.prepare(`
+      SELECT 
+        CASE 
+          WHEN m.senderUsername = ? THEN m.receiverUsername 
+          ELSE m.senderUsername 
+        END as username,
+        MAX(m.createdAt) as lastMessageAt
+      FROM messages m
+      WHERE m.senderUsername = ? OR m.receiverUsername = ?
+      GROUP BY username
+      ORDER BY lastMessageAt DESC
+      LIMIT 20
+    `).all(session.username, session.username, session.username);
+    
+    // We can also fetch the color and avatar for these users
+    const usernames = partners.map((p: any) => p.username);
+    if (usernames.length === 0) {
+      return res.json([]);
+    }
+    
+    const placeholders = usernames.map(() => '?').join(',');
+    const usersInfo = db.prepare(`SELECT username, color, avatar FROM sessions WHERE username IN (${placeholders})`).all(...usernames);
+    
+    const enrichedPartners = partners.map((p: any) => {
+      const info = usersInfo.find((u: any) => u.username === p.username);
+      return {
+        ...p,
+        color: info ? (info as any).color : 'bg-neutral-500',
+        avatar: info ? (info as any).avatar : '👤'
+      };
+    });
+    
+    res.json(enrichedPartners);
+  });
+
+  app.get('/api/search', requireSession, (req: any, res: any) => {
+    const query = req.query.q;
+    const session = req.session;
+    if (!query) return res.json({ posts: [], messages: [] });
+    
+    const posts = db.prepare("SELECT * FROM posts WHERE content LIKE ? COLLATE NOCASE OR fileName LIKE ? COLLATE NOCASE LIMIT 20").all(`%${query}%`, `%${query}%`);
+    const messages = db.prepare("SELECT * FROM messages WHERE (senderUsername = ? OR receiverUsername = ?) AND (content LIKE ? COLLATE NOCASE OR fileName LIKE ? COLLATE NOCASE) LIMIT 20").all(session.username, session.username, `%${query}%`, `%${query}%`);
+    
+    res.json({ posts, messages });
   });
 
   // Get Posts
@@ -192,28 +288,50 @@ async function startServer() {
   });
 
   // Create Post
-  app.post('/api/posts', requireSession, upload.single('file'), (req: any, res: any) => {
-    const { content } = req.body;
+  app.post('/api/posts', requireSession, upload.single('file'), async (req: any, res: any) => {
+    const { content, parentId } = req.body;
     const file = req.file;
     const session = req.session;
 
-    if (!content && !file) {
-      return res.status(400).json({ error: 'Must provide content or file' });
+    const driveFileUrl = req.body.driveFileUrl;
+    const driveFileName = req.body.driveFileName;
+    const driveFileType = req.body.driveFileType;
+
+    if (!content && !file && !driveFileUrl) {
+      return res.status(400).json({ error: 'Must provide content, file, or drive link' });
     }
 
     const postId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    const fileUrl = file ? `/uploads/${file.filename}` : null;
-    const fileName = file ? file.originalname : null;
-    const fileType = file ? file.mimetype : null;
+    let fileUrl = file ? `/uploads/${file.filename}` : (driveFileUrl || null);
+    
+    if (file && process.env.CLOUDINARY_CLOUD_NAME) {
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          });
+        });
+        fileUrl = (result as any).secure_url;
+        fs.unlinkSync(file.path);
+      } catch (err: any) {
+        console.error('Cloudinary upload error:', err);
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        return res.status(500).json({ error: `Cloudinary upload error: ${err.message || 'Unknown error'}` });
+      }
+    }
+
+    const fileName = file ? file.originalname : (driveFileName || null);
+    const fileType = file ? file.mimetype : (driveFileType || null);
 
     const stmt = db.prepare(`
-      INSERT INTO posts (id, sessionId, username, color, avatar, content, fileUrl, fileName, fileType, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO posts (id, sessionId, username, color, avatar, content, parentId, fileUrl, fileName, fileType, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    stmt.run(postId, session.id, session.username, session.color, session.avatar, content, fileUrl, fileName, fileType, expiresAt);
+    stmt.run(postId, session.id, session.username, session.color, session.avatar, content || null, parentId || null, fileUrl, fileName, fileType, expiresAt);
 
     const newPost = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
     
@@ -253,13 +371,14 @@ async function startServer() {
     const otherUsername = req.params.username;
     const myUsername = req.session.username;
 
+    const nowIso = new Date().toISOString();
     // Mark as seen
     db.prepare(`
-      UPDATE messages SET status = 'seen' 
+      UPDATE messages SET status = 'seen', seenAt = ? 
       WHERE senderUsername = ? AND receiverUsername = ? AND status != 'seen'
-    `).run(otherUsername, myUsername);
+    `).run(nowIso, otherUsername, myUsername);
 
-    io.to(otherUsername).emit('messages_seen', { by: myUsername });
+    io.to(otherUsername).emit('messages_seen', { by: myUsername, seenAt: nowIso });
 
     const stmt = db.prepare(`
       SELECT m.*, 
@@ -288,25 +407,62 @@ async function startServer() {
   });
 
   // Send Message
-  app.post('/api/messages/:username', requireSession, upload.single('file'), (req: any, res: any) => {
+  app.post('/api/messages/:username', requireSession, upload.single('file'), async (req: any, res: any) => {
     const receiverUsername = req.params.username;
-    const { content } = req.body;
+    const { content, parentId } = req.body;
     const file = req.file;
     const session = req.session;
+
+    const partners = db.prepare(`
+      SELECT DISTINCT 
+        CASE 
+          WHEN senderUsername = ? THEN receiverUsername 
+          ELSE senderUsername 
+        END as partner
+      FROM messages 
+      WHERE senderUsername = ? OR receiverUsername = ?
+    `).all(session.username, session.username, session.username);
+    
+    const partnerSet = new Set(partners.map((p: any) => p.partner));
+    if (partnerSet.size >= 20 && !partnerSet.has(receiverUsername)) {
+      return res.status(403).json({ error: 'You have reached the maximum limit of 20 private chats.' });
+    }
+
+    const driveFileUrl = req.body.driveFileUrl;
+    const driveFileName = req.body.driveFileName;
+    const driveFileType = req.body.driveFileType;
 
     const msgId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    const fileUrl = file ? `/uploads/${file.filename}` : null;
-    const fileName = file ? file.originalname : null;
-    const fileType = file ? file.mimetype : null;
+    let fileUrl = file ? `/uploads/${file.filename}` : (driveFileUrl || null);
+    
+    if (file && process.env.CLOUDINARY_CLOUD_NAME) {
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          });
+        });
+        fileUrl = (result as any).secure_url;
+        fs.unlinkSync(file.path);
+      } catch (err: any) {
+        console.error('Cloudinary upload error:', err);
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        return res.status(500).json({ error: `Cloudinary upload error: ${err.message || 'Unknown error'}` });
+      }
+    }
+
+    const fileName = file ? file.originalname : (driveFileName || null);
+    const fileType = file ? file.mimetype : (driveFileType || null);
 
     const stmt = db.prepare(`
-      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, fileUrl, fileName, fileType, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, parentId, fileUrl, fileName, fileType, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    stmt.run(msgId, session.id, session.username, receiverUsername, content, fileUrl, fileName, fileType, expiresAt);
+    stmt.run(msgId, session.id, session.username, receiverUsername, content || null, parentId || null, fileUrl, fileName, fileType, expiresAt);
 
     const newMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
     
@@ -316,6 +472,27 @@ async function startServer() {
     io.to(session.username).emit('new_message', newMsg);
     
     res.json(newMsg);
+  });
+
+  // Toggle Pin Message
+  app.post('/api/messages/:id/pin', requireSession, (req: any, res: any) => {
+    const messageId = req.params.id;
+    const session = req.session;
+
+    const msg = db.prepare('SELECT senderUsername, receiverUsername, isPinned FROM messages WHERE id = ?').get(messageId) as any;
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    
+    if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    const newPinned = msg.isPinned ? 0 : 1;
+    db.prepare('UPDATE messages SET isPinned = ? WHERE id = ?').run(newPinned, messageId);
+
+    io.to(msg.senderUsername).emit('message_pinned', { messageId, isPinned: newPinned });
+    io.to(msg.receiverUsername).emit('message_pinned', { messageId, isPinned: newPinned });
+
+    return res.json({ success: true, isPinned: newPinned });
   });
 
   // React to Message
@@ -396,29 +573,47 @@ async function startServer() {
 
     socket.on('messages_seen', (data) => {
       try {
+        const nowIso = new Date().toISOString();
         db.prepare(`
-          UPDATE messages SET status = 'seen' 
+          UPDATE messages SET status = 'seen', seenAt = ? 
           WHERE senderUsername = ? AND receiverUsername = ? AND status != 'seen'
-        `).run(data.to, data.from); // from is the one who saw it, so receiver = from, sender = to
-        io.to(data.to).emit('messages_seen', { by: data.from });
+        `).run(nowIso, data.to, data.from); // from is the one who saw it, so receiver = from, sender = to
+        io.to(data.to).emit('messages_seen', { by: data.from, seenAt: nowIso });
       } catch(e) {}
     });
   });
 
   // --- Background Cleanup ---
   // Delete expired items every minute
-  setInterval(() => {
+  setInterval(async () => {
     const now = new Date().toISOString();
     
-    // Select files to delete from FS
+    // Select files to delete from FS and Cloudinary
     const expiredPosts = db.prepare('SELECT fileUrl FROM posts WHERE expiresAt < ? AND fileUrl IS NOT NULL').all(now) as any[];
     const expiredMsgs = db.prepare('SELECT fileUrl FROM messages WHERE expiresAt < ? AND fileUrl IS NOT NULL').all(now) as any[];
     
-    [...expiredPosts, ...expiredMsgs].forEach((item: any) => {
-      const filename = item.fileUrl.replace('/uploads/', '');
-      const filepath = path.join(uploadDir, filename);
-      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
-    });
+    for (const item of [...expiredPosts, ...expiredMsgs]) {
+      if (item.fileUrl) {
+        if (item.fileUrl.includes('cloudinary.com')) {
+          if (process.env.CLOUDINARY_CLOUD_NAME) {
+            try {
+              // Extract public_id from Cloudinary URL
+              // Format: https://res.cloudinary.com/<cloud_name>/<resource_type>/<type>/<version>/<public_id>.<ext>
+              const urlParts = item.fileUrl.split('/');
+              const filenameWithExt = urlParts[urlParts.length - 1];
+              const publicId = filenameWithExt.split('.')[0];
+              await cloudinary.uploader.destroy(publicId);
+            } catch (err) {
+              console.error('Failed to delete from Cloudinary:', err);
+            }
+          }
+        } else if (item.fileUrl.startsWith('/uploads/')) {
+          const filename = item.fileUrl.replace('/uploads/', '');
+          const filepath = path.join(uploadDir, filename);
+          if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+        }
+      }
+    }
 
     db.prepare('DELETE FROM posts WHERE expiresAt < ?').run(now);
     db.prepare('DELETE FROM message_reactions WHERE expiresAt < ?').run(now);

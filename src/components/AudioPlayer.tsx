@@ -34,26 +34,33 @@ export function AudioPlayer({ src }: { src: string }) {
         }
 
         // Decode for waveform
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        const rawData = audioBuffer.getChannelData(0);
-        const samples = 40;
-        const blockSize = Math.floor(rawData.length / samples);
-        const filteredData = [];
-        for (let i = 0; i < samples; i++) {
-          let blockStart = blockSize * i;
-          let sum = 0;
-          for (let j = 0; j < blockSize; j++) {
-            sum = sum + Math.abs(rawData[blockStart + j]);
+        let audioContext: AudioContext | null = null;
+        try {
+          audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          const rawData = audioBuffer.getChannelData(0);
+          const samples = 40;
+          const blockSize = Math.floor(rawData.length / samples);
+          const filteredData = [];
+          for (let i = 0; i < samples; i++) {
+            let blockStart = blockSize * i;
+            let sum = 0;
+            for (let j = 0; j < blockSize; j++) {
+              sum = sum + Math.abs(rawData[blockStart + j]);
+            }
+            filteredData.push(sum / blockSize);
           }
-          filteredData.push(sum / blockSize);
-        }
-        
-        const maxVal = Math.max(...filteredData);
-        const multiplier = maxVal ? Math.pow(maxVal, -1) : 1;
-        const normalizedData = filteredData.map(n => n * multiplier);
-        if (active) {
-          setWaveform(normalizedData);
+          
+          const maxVal = Math.max(...filteredData);
+          const multiplier = maxVal ? Math.pow(maxVal, -1) : 1;
+          const normalizedData = filteredData.map(n => n * multiplier);
+          if (active) {
+            setWaveform(normalizedData);
+          }
+        } finally {
+          if (audioContext) {
+            audioContext.close().catch(console.error);
+          }
         }
       } catch (e) {
         console.error("Failed to generate waveform", e);
@@ -152,9 +159,10 @@ export function AudioPlayer({ src }: { src: string }) {
   };
 
   return (
-    <div className="flex flex-col space-y-1 w-full max-w-[280px]">
+    <div className="flex flex-col space-y-1 w-full max-w-md">
       <div className="flex items-center space-x-3 bg-black/20 rounded-[20px] p-2 pr-3 w-full">
         <button 
+          aria-label={isPlaying ? 'Pause' : 'Play'}
           onClick={togglePlay}
           className="w-10 h-10 flex-shrink-0 bg-[#3b82f6] text-white rounded-full flex items-center justify-center hover:bg-[#2563eb] transition-colors shadow-sm"
         >
@@ -195,6 +203,7 @@ export function AudioPlayer({ src }: { src: string }) {
         </div>
 
         <button 
+          aria-label="Toggle playback rate"
           onClick={toggleRate}
           className="flex-shrink-0 w-9 h-9 rounded-full hover:bg-white/10 flex items-center justify-center text-xs font-medium text-white transition-colors"
         >
