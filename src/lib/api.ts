@@ -5,7 +5,14 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
     ...(sessionId ? { 'x-session-id': sessionId } : {}),
   };
 
-  const response = await fetch(endpoint, { ...options, headers });
+  let response;
+try {
+  response = await fetch(endpoint, { ...options, headers });
+} catch (err) {
+  // Silent catch to prevent console error spam during server restarts or network disconnects.
+  // The error will still be thrown for the caller to handle appropriately.
+  throw err;
+}
   
   const contentType = response.headers.get('content-type');
   if (contentType && contentType.includes('text/html')) {

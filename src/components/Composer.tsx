@@ -288,9 +288,9 @@ export const Composer = memo(({
                             const previewUrl = isImage ? URL.createObjectURL(f) : null;
                             return { id: Math.random().toString(), file: f, name: f.name, previewUrl };
                           });
-                          const validFiles = newFiles.filter(f => f.file.size <= 25 * 1024 * 1024 * 1024);
+                          const validFiles = newFiles.filter(f => f.file.size <= 30 * 1024 * 1024);
                           if (validFiles.length < newFiles.length) {
-                            setToastMessage("Some files were skipped because they exceed 25GB.");
+                            setToastMessage("Some files were skipped because they exceed 30MB.");
                           }
                           setAttachments(prev => [...prev, ...validFiles]);
                         }
@@ -307,9 +307,9 @@ export const Composer = memo(({
                             const previewUrl = isImage ? URL.createObjectURL(f) : null;
                             return { id: Math.random().toString(), file: f, name: f.name, previewUrl };
                           });
-                          const validFiles = newFiles.filter(f => f.file.size <= 25 * 1024 * 1024 * 1024);
+                          const validFiles = newFiles.filter(f => f.file.size <= 30 * 1024 * 1024);
                           if (validFiles.length < newFiles.length) {
-                            setToastMessage("Some files were skipped because they exceed 25GB.");
+                            setToastMessage("Some files were skipped because they exceed 30MB.");
                           }
                           setAttachments(prev => [...prev, ...validFiles]);
                         }
@@ -327,7 +327,7 @@ export const Composer = memo(({
                 type="button"
                 aria-label="Add files"
                 onClick={() => setIsMenuOpen(!isMenuOpen)}
-                className={clsx("w-8 h-8 flex items-center justify-center rounded-full text-neutral-400 hover:text-white hover:bg-white/10 transition-colors", isMenuOpen && "bg-white/10 text-white")}
+                className={clsx("w-10 h-10 md:w-8 md:h-8 flex items-center justify-center rounded-full text-neutral-400 hover:text-white hover:bg-white/10 transition-colors", isMenuOpen && "bg-white/10 text-white")}
               >
                 <Plus className={clsx("w-5 h-5 transition-transform", isMenuOpen && "rotate-45")} />
               </button>
@@ -350,10 +350,7 @@ export const Composer = memo(({
               type="button"
               aria-label="Microphone"
               onClick={handleMicClick}
-              className={clsx(
-                "p-1.5 transition-colors cursor-pointer rounded-full overflow-hidden flex items-center justify-center",
-                "text-neutral-400 hover:text-white"
-              )}
+              className={clsx("p-2 md:p-1.5 transition-colors cursor-pointer rounded-full overflow-hidden flex items-center justify-center", "text-neutral-400 hover:text-white")}
             >
               <Mic className="w-5 h-5" />
             </button>

@@ -8,6 +8,7 @@ import clsx from 'clsx';
 import { initAuth, googleSignIn, getAccessToken } from '../lib/auth';
 import { loadPickerApi, openPicker } from '../lib/picker';
 import { AudioVisualizer } from './AudioVisualizer';
+import { PullToRefresh } from './PullToRefresh';
 import { Composer } from './Composer';
 import { LargeAudioVisualizer } from './LargeAudioVisualizer';
 import { AudioTrimmer } from './AudioTrimmer';
@@ -45,6 +46,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     };
   }, [session.username]);
   const [view, setView] = useState<'feed' | 'chat' | 'global_search'>('feed');
+  const [mobileShowSidebar, setMobileShowSidebar] = useState(false);
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [chatSearchQuery, setChatSearchQuery] = useState('');
@@ -89,9 +91,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
   const [storageUsage, setStorageUsage] = useState<{usageBytes: number, limitBytes: number} | null>(null);
 
   useEffect(() => {
-    fetchApi('/api/storage/usage').then(setStorageUsage).catch(console.error);
+    fetchApi('/api/storage/usage').then(setStorageUsage).catch(() => {});
     const interval = setInterval(() => {
-      fetchApi('/api/storage/usage').then(setStorageUsage).catch(console.error);
+      fetchApi('/api/storage/usage').then(setStorageUsage).catch(() => {});
     }, 30000); // refresh every 30s
     return () => clearInterval(interval);
   }, []);
@@ -240,6 +242,17 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
   const [isCustomizing, setIsCustomizing] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if ((view === 'chat' || activeThread) && messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView();
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [view, activeThread]);
+
 
   useEffect(() => {
     if ((view === 'chat' || activeThread) && messagesEndRef.current) {
@@ -409,7 +422,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
   useEffect(() => {
     initAuth();
-    loadPickerApi(() => console.log('Picker loaded'));
+    loadPickerApi(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -486,11 +499,11 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         />
       )}
 
-      <div className="h-screen w-full bg-neutral-950 text-white flex flex-col md:flex-row overflow-hidden">
+      <div className="h-[100dvh] w-full bg-neutral-950 text-white flex flex-col md:flex-row overflow-hidden">
       {/* Sidebar / Topbar */}
       <div className={clsx(
-        "w-full md:w-80 bg-neutral-900 border-b md:border-b-0 md:border-r border-white/10 flex-col flex-shrink-0",
-        view === 'chat' ? 'hidden md:flex' : 'flex'
+        "w-full md:w-80 bg-neutral-900 border-b md:border-b-0 md:border-r border-white/10 flex-col flex-shrink-0 flex-1 md:flex-none",
+        mobileShowSidebar ? 'flex' : 'hidden md:flex'
       )}>
         <div className="p-4 border-b border-white/10 flex items-center justify-between">
           <div className="flex items-center space-x-3">
@@ -525,7 +538,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                   searchResults.map(res => (
                     <button 
                       key={res.username}
-                      onClick={() => openChat(res.username, res.color, res.avatar)}
+                      onClick={() => { openChat(res.username, res.color, res.avatar); setMobileShowSidebar(false); }}
                       className="w-full text-left px-4 py-3 hover:bg-white/5 flex items-center space-x-3 transition-colors"
                     >
                       <div className={clsx("w-8 h-8 rounded-full flex flex-shrink-0 items-center justify-center text-sm", res.color)}>
@@ -548,9 +561,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           </div>
         </div>
 
-        <nav className="p-2 space-y-1">
+        <PullToRefresh className="p-2 space-y-1" onRefresh={async () => { await fetchApi('/api/chats').then(setChats); }}>
           <button 
-            onClick={() => { setView('feed'); setActiveThread(null); }}
+            onClick={() => { setView('feed'); setActiveThread(null); setMobileShowSidebar(false); }}
             className={clsx("w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-colors", view === 'feed' ? "bg-white/10 text-white" : "text-neutral-400 hover:bg-white/5 hover:text-white")}
           >
             <Globe className="w-5 h-5" />
@@ -559,7 +572,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           {chats.map((chat: any) => (
             <button 
               key={chat.username}
-              onClick={() => { openChat(chat.username, chat.color, chat.avatar); }}
+              onClick={() => { openChat(chat.username, chat.color, chat.avatar); setMobileShowSidebar(false); }}
               className={clsx("w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-colors", view === 'chat' && activeChat === chat.username ? "bg-white/10 text-white" : "text-neutral-400 hover:bg-white/5 hover:text-white")}
             >
               <div className={clsx("w-6 h-6 rounded-full flex flex-shrink-0 items-center justify-center text-[10px]", chat.color)}>
@@ -568,7 +581,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               <span className="font-medium truncate">{chat.username}</span>
             </button>
           ))}
-        </nav>
+        </PullToRefresh>
         
         {storageUsage && (
           <div className="p-4 mt-auto border-t border-white/5">
@@ -576,7 +589,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               <span>Storage (25GB)</span>
               <span>{(storageUsage.usageBytes / (1024 * 1024 * 1024)).toFixed(2)} GB used</span>
             </div>
-            <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+            <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden mb-3">
               <div 
                 className={clsx(
                   "h-full transition-all duration-500",
@@ -585,22 +598,45 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                 style={{ width: `${Math.min(100, (storageUsage.usageBytes / storageUsage.limitBytes) * 100)}%` }}
               />
             </div>
+            <button
+              onClick={async () => {
+                if (confirm('Are you sure you want to clear all storage? This will delete all posts and messages.')) {
+                  try {
+                    setStorageUsage({ usageBytes: 0, limitBytes: 25 * 1024 * 1024 * 1024 });
+                    setPosts([]); // Clear posts from UI
+                    setChats([]);
+                    setMessages([]);
+                    setActiveChat(null);
+                    await fetchApi('/api/storage/clear', { method: 'POST' });
+                    setToastMessage('Storage cleared successfully!');
+                    setTimeout(() => setToastMessage(null), 3000);
+                  } catch (err) {
+                    console.error('Failed to clear storage:', err);
+                    alert('Failed to clear storage');
+                  }
+                }
+              }}
+              className="w-full py-1.5 px-3 bg-red-500/10 hover:bg-red-500/20 active:bg-red-500/30 text-red-400 text-xs rounded-md transition-all active:scale-95 flex items-center justify-center gap-2"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Clear Storage
+            </button>
           </div>
         )}
       </div>
 
       {/* Main Content Area */}
       <div className={clsx(
-        "flex-1 flex-col relative h-full overflow-hidden",
-        view === 'feed' ? 'hidden md:flex' : 'flex'
+        "flex-1 flex-col relative h-full overflow-hidden w-full md:w-auto",
+        !mobileShowSidebar ? 'flex' : 'hidden md:flex'
       )}>
         {/* Header */}
         <header className="h-16 flex items-center justify-between px-4 md:px-6 border-b border-white/10 flex-shrink-0 bg-neutral-900/50 backdrop-blur-md sticky top-0 z-10">
           <div className="flex items-center">
-            {(view === 'chat' || activeThread) && (
+            {(view === 'chat' || activeThread || !mobileShowSidebar) && (
               <button 
-                aria-label={activeThread ? "Back to chat" : "Back to feed"}
-                onClick={() => { if (activeThread) setActiveThread(null); else { setView('feed'); setActiveThread(null); } }}
+                aria-label={activeThread ? "Back to chat" : "Back to menu"}
+                onClick={() => { if (activeThread) setActiveThread(null); else setMobileShowSidebar(true); }}
                 className={clsx("mr-3 p-2 hover:bg-white/10 text-neutral-400 hover:text-white rounded-full transition-colors", !activeThread && "md:hidden")}
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -670,9 +706,18 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         )}
 
         {/* Scrollable Area */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-6 pt-6 pb-24 space-y-6" onClick={() => setActiveMenuMsg(null)} onScroll={() => setActiveMenuMsg(null)}>
+        <PullToRefresh 
+          className="px-4 md:px-6 pt-6 pb-4 space-y-6" 
+          onClick={() => setActiveMenuMsg(null)} 
+          onScroll={() => setActiveMenuMsg(null)}
+          onRefresh={async () => {
+            if (view === 'feed') await fetchApi('/api/posts').then(setPosts);
+            else if (view === 'chat' && activeChat) await fetchApi(`/api/messages/${activeChat}`).then(setMessages);
+          }}
+        >
+          <AnimatePresence mode="wait">
           {view === 'global_search' ? (
-            <div className="flex flex-col space-y-6 max-w-2xl mx-auto">
+            <motion.div key="search" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }} className="flex flex-col space-y-6 max-w-2xl mx-auto w-full">
               <h3 className="text-lg font-medium text-white">Search Results</h3>
               {globalSearchResults.messages.length > 0 && (
                 <div className="space-y-4">
@@ -703,9 +748,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               {globalSearchResults.posts.length === 0 && globalSearchResults.messages.length === 0 && (
                 <div className="text-neutral-500 text-center py-8">No results found for "{globalSearchQuery}"</div>
               )}
-            </div>
+            </motion.div>
           ) : view === 'feed' ? (
-            <div className="space-y-6 max-w-2xl mx-auto">
+            <motion.div key="feed" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }} className="space-y-6 max-w-2xl mx-auto w-full">
               {posts.map((post) => (
                 <DissolvingItem 
                   initial={{ opacity: 0, y: 10 }}
@@ -737,7 +782,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     )}
                   </div>
                   {post.content && (
-                    <p className="text-neutral-200 text-[15px] leading-relaxed mb-4 whitespace-pre-wrap">{post.content}</p>
+                    <p className="text-neutral-200 text-[15px] leading-relaxed mb-4 whitespace-pre-wrap break-words">{post.content}</p>
                   )}
                   {post.fileUrl && (
                     <div className="rounded-xl overflow-hidden bg-neutral-950 border border-white/5">
@@ -765,9 +810,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               {posts.length === 0 && (
                 <div className="text-center text-neutral-500 py-12">No posts yet. Be the first to share!</div>
               )}
-            </div>
+            </motion.div>
           ) : (
-            <div className="flex flex-col space-y-4 max-w-3xl mx-auto">
+            <motion.div key={activeThread ? `thread-${activeThread.id}` : `chat-${activeChat}`} initial={{ opacity: 0, x: activeThread ? 20 : -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: activeThread ? -20 : 20 }} transition={{ duration: 0.2 }} className="flex flex-col space-y-4 max-w-3xl mx-auto w-full">
               {(() => {
                 const displayedMessages = activeThread
                   ? [activeThread, ...messages.filter((m: any) => m.parentId === activeThread.id)]
@@ -810,11 +855,11 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           isMe ? "bg-white text-black rounded-br-sm" : "bg-neutral-800 text-white rounded-bl-sm"
                         )}
                       >
-                        {msg.content && <div className="whitespace-pre-wrap">{highlightText(msg.content, chatSearchQuery)}</div>}
+                        {msg.content && <div className="whitespace-pre-wrap break-words">{highlightText(msg.content, chatSearchQuery)}</div>}
                         {msg.fileUrl && (
                           <div className="mt-2 rounded-lg overflow-hidden">
                             {msg.fileType?.startsWith('image/') ? (
-                              <img loading="lazy" src={msg.fileUrl} alt="attachment" className="max-w-full rounded-md cursor-pointer" onClick={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })} />
+                              <img loading="lazy" src={msg.fileUrl} alt="attachment" className="max-w-full max-h-96 object-contain rounded-md cursor-pointer" onClick={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })} />
                             ) : msg.fileType?.startsWith('audio/') ? (
                               <AudioPlayer src={msg.fileUrl} />
                             ) : (
@@ -942,13 +987,13 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               });
               })()}
               <div ref={messagesEndRef} />
-            </div>
+            </motion.div>
           )}
-        </div>
-
+          </AnimatePresence>
+        </PullToRefresh>
         {/* Composer Footer */}
         {view !== 'global_search' && (
-        <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-neutral-950 via-neutral-950/90 to-transparent">
+        <div className="w-full flex-shrink-0 p-2 md:p-4 pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:pb-4 bg-neutral-950 border-t border-white/5 z-20">
           <div className="max-w-3xl mx-auto relative">
             <AnimatePresence>
               {audioDraft && (

@@ -85,7 +85,20 @@ async function startServer() {
       expiresAt DATETIME NOT NULL,
       FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
   `);
+  
+  const getSetting = (key: string) => {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as any;
+    return row ? row.value : null;
+  };
+  
+  const setSetting = (key: string, value: string) => {
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+  };
   
   // Migration for existing databases
   try {
@@ -116,7 +129,7 @@ async function startServer() {
   });
   const upload = multer({ 
     storage,
-    limits: { fileSize: 25 * 1024 * 1024 * 1024 } // 25GB limit
+    limits: { fileSize: 30 * 1024 * 1024 } // 30MB limit
   });
 
   // --- API Routes ---
@@ -206,17 +219,64 @@ async function startServer() {
   // Storage usage
   app.get('/api/storage/usage', requireSession, async (req: any, res: any) => {
     try {
+      const limitBytes = 25 * 1024 * 1024 * 1024; // 25GB
+      
+      const lastClearedStr = getSetting('last_cleared_time');
+      const lastCleared = lastClearedStr ? parseInt(lastClearedStr, 10) : 0;
+      // Cloudinary cache can take 24h to update, so assume 0 if cleared recently
+      if (Date.now() - lastCleared < 24 * 60 * 60 * 1000) {
+        return res.json({ usageBytes: 0, limitBytes });
+      }
+
       if (!process.env.CLOUDINARY_CLOUD_NAME) {
-        return res.json({ usageBytes: 0, limitBytes: 25 * 1024 * 1024 * 1024 });
+        return res.json({ usageBytes: 0, limitBytes });
       }
       const usage = await cloudinary.api.usage();
       // Cloudinary storage usage is in bytes, limits are in credits (1 credit = 1GB)
       const usageBytes = usage.storage.usage || 0;
-      const limitBytes = 25 * 1024 * 1024 * 1024; // 25GB
       res.json({ usageBytes, limitBytes });
     } catch (err) {
       console.error('Failed to fetch cloudinary usage:', err);
       res.status(500).json({ error: 'Failed to fetch storage usage' });
+    }
+  });
+
+  // Clear Storage
+  app.post('/api/storage/clear', requireSession, async (req: any, res: any) => {
+    try {
+      if (process.env.CLOUDINARY_CLOUD_NAME) {
+        // Run in background to prevent request timeout
+        (async () => {
+          try {
+            await cloudinary.api.delete_all_resources({ resource_type: 'image' });
+            await cloudinary.api.delete_all_resources({ resource_type: 'video' });
+            await cloudinary.api.delete_all_resources({ resource_type: 'raw' });
+          } catch(e) {
+            console.error('Cloudinary background delete error:', e);
+          }
+        })();
+      }
+      
+      const uploadDir = path.join(process.cwd(), 'uploads');
+      if (fs.existsSync(uploadDir)) {
+        const files = fs.readdirSync(uploadDir);
+        for (const file of files) {
+          try {
+            fs.unlinkSync(path.join(uploadDir, file));
+          } catch(e) {}
+        }
+      }
+
+      db.prepare('DELETE FROM posts').run();
+      db.prepare('DELETE FROM messages').run();
+      db.prepare('DELETE FROM message_reactions').run();
+
+      setSetting('last_cleared_time', Date.now().toString());
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Failed to clear storage:', err);
+      res.status(500).json({ error: 'Failed to clear storage' });
     }
   });
 
@@ -315,10 +375,10 @@ async function startServer() {
           });
         });
         fileUrl = (result as any).secure_url;
-        fs.unlinkSync(file.path);
+        setTimeout(() => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }, 10000);
       } catch (err: any) {
         console.error('Cloudinary upload error:', err);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        setTimeout(() => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }, 10000);
         return res.status(500).json({ error: `Cloudinary upload error: ${err.message || 'Unknown error'}` });
       }
     }
@@ -446,10 +506,10 @@ async function startServer() {
           });
         });
         fileUrl = (result as any).secure_url;
-        fs.unlinkSync(file.path);
+        setTimeout(() => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }, 10000);
       } catch (err: any) {
         console.error('Cloudinary upload error:', err);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        setTimeout(() => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }, 10000);
         return res.status(500).json({ error: `Cloudinary upload error: ${err.message || 'Unknown error'}` });
       }
     }
