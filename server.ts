@@ -71,6 +71,7 @@ async function startServer() {
       fileType TEXT,
       status TEXT DEFAULT 'sent',
       isPinned BOOLEAN DEFAULT 0,
+      isEdited BOOLEAN DEFAULT 0,
       seenAt DATETIME,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       expiresAt DATETIME NOT NULL,
@@ -113,6 +114,10 @@ async function startServer() {
   
   try {
     db.exec("ALTER TABLE messages ADD COLUMN seenAt DATETIME");
+  } catch(e) {}
+
+  try {
+    db.exec("ALTER TABLE messages ADD COLUMN isEdited BOOLEAN DEFAULT 0");
   } catch(e) {}
 
   // Ensure uploads directory exists
@@ -426,6 +431,23 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  // Edit Post
+  app.put('/api/posts/:id', requireSession, (req: any, res: any) => {
+    const postId = req.params.id;
+    const session = req.session;
+    const { content } = req.body;
+
+    const stmt = db.prepare('SELECT * FROM posts WHERE id = ?');
+    const post: any = stmt.get(postId);
+
+    if (!post) return res.status(404).json({ error: 'Not found' });
+    if (post.sessionId !== session.id) return res.status(403).json({ error: 'Unauthorized' });
+
+    db.prepare('UPDATE posts SET content = ? WHERE id = ?').run(content, postId);
+    io.emit('edit_post', { postId, content });
+    res.json({ success: true, content });
+  });
+
   // Get Messages
   app.get('/api/messages/:username', requireSession, (req: any, res: any) => {
     const otherUsername = req.params.username;
@@ -553,6 +575,46 @@ async function startServer() {
     io.to(msg.receiverUsername).emit('message_pinned', { messageId, isPinned: newPinned });
 
     return res.json({ success: true, isPinned: newPinned });
+  });
+
+  // Edit Message
+  app.put('/api/messages/:id', requireSession, (req: any, res: any) => {
+    const messageId = req.params.id;
+    const session = req.session;
+    const { content } = req.body;
+
+    const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
+      return res.status(403).json({ error: 'Unauthorized to edit' });
+    }
+
+    db.prepare('UPDATE messages SET content = ?, isEdited = 1 WHERE id = ?').run(content, messageId);
+    
+    io.to(msg.senderUsername).emit('edit_message', { messageId, content });
+    io.to(msg.receiverUsername).emit('edit_message', { messageId, content });
+    
+    return res.json({ success: true, content });
+  });
+
+  // Delete Message
+  app.delete('/api/messages/:id', requireSession, (req: any, res: any) => {
+    const messageId = req.params.id;
+    const session = req.session;
+
+    const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
+      return res.status(403).json({ error: 'Unauthorized to delete' });
+    }
+
+    db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
+    db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
+    
+    io.to(msg.senderUsername).emit('delete_message', { messageId });
+    io.to(msg.receiverUsername).emit('delete_message', { messageId });
+    
+    return res.json({ success: true });
   });
 
   // React to Message
