@@ -8,13 +8,15 @@ interface Props {
   className?: string;
   onClick?: MouseEventHandler<HTMLDivElement>;
   onScroll?: UIEventHandler<HTMLDivElement>;
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
 }
 
-export const PullToRefresh = ({ onRefresh, children, className = "", onClick, onScroll }: Props) => {
+export const PullToRefresh = ({ onRefresh, children, className = "", onClick, onScroll, scrollRef }: Props) => {
   const [startY, setStartY] = useState(0);
   const [pullDistance, setPullDistance] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const fallbackRef = useRef<HTMLDivElement>(null);
+  const containerRef = scrollRef || fallbackRef;
   const MAX_PULL_DISTANCE = 80;
   const THRESHOLD = 60;
 

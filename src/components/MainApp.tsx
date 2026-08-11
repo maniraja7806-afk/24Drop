@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Edit2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause, Pin, PinOff } from 'lucide-react';
+import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Edit2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause, Pin, PinOff, Smile, Database, Reply, ChevronDown } from 'lucide-react';
 import { fetchApi } from '../lib/api';
 import { socket } from '../lib/socket';
+import { formatBytes } from '../lib/format';
 import { Countdown } from './Countdown';
 import clsx from 'clsx';
 import { initAuth, googleSignIn, getAccessToken } from '../lib/auth';
@@ -16,8 +17,26 @@ import { RecordingTimer } from './RecordingTimer';
 import { AudioPlayer } from './AudioPlayer';
 import { ImageCropper } from './ImageCropper';
 import { DissolvingItem } from './DissolvingItem';
-import EmojiPicker, { Theme } from 'emoji-picker-react';
+import { FileAttachmentView } from './FileAttachmentView';
+import { ReactionPickerPopup, ReactionBubblePill, ReactedUsersModal, getCustomReactions } from './ReactionSystem';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
+
+const formatStorageDisplay = (bytes: number, limitBytes: number = 25 * 1024 * 1024 * 1024) => {
+  const limitGB = (limitBytes / (1024 * 1024 * 1024)).toFixed(0);
+  if (!bytes || bytes <= 0) {
+    return `0.00 GB used of ${limitGB} GB`;
+  }
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 0.01) {
+    return `${gb.toFixed(2)} GB used of ${limitGB} GB`;
+  }
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 0.1) {
+    return `${mb.toFixed(2)} MB used of ${limitGB} GB`;
+  }
+  const kb = bytes / 1024;
+  return `${kb.toFixed(2)} KB used of ${limitGB} GB`;
+};
 
 const highlightText = (text: string, query: string) => {
   if (!query) return text;
@@ -91,14 +110,33 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
   const [posts, setPosts] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
-  const [storageUsage, setStorageUsage] = useState<{usageBytes: number, limitBytes: number} | null>(null);
+  const [replyToMessage, setReplyToMessage] = useState<any | null>(null);
+  const [storageUsage, setStorageUsage] = useState<{usageBytes: number, limitBytes: number, categories?: { images: number; videos: number; audio: number; documents: number; others: number }} | null>(null);
+  const [showClearStorageModal, setShowClearStorageModal] = useState(false);
+
+  useEffect(() => {
+    setReplyToMessage(null);
+  }, [activeChat]);
 
   useEffect(() => {
     fetchApi('/api/storage/usage').then(setStorageUsage).catch(() => {});
+    
+    const handleStorageUpdated = (data: any) => {
+      if (data) {
+        setStorageUsage(data);
+      }
+    };
+
+    socket.on('storage_updated', handleStorageUpdated);
+
     const interval = setInterval(() => {
       fetchApi('/api/storage/usage').then(setStorageUsage).catch(() => {});
-    }, 30000); // refresh every 30s
-    return () => clearInterval(interval);
+    }, 30000); // refresh every 30s as backup
+    
+    return () => {
+      socket.off('storage_updated', handleStorageUpdated);
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -116,22 +154,68 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
   useEffect(() => {
     fetchApi("/api/posts").then(setPosts).catch(console.error);
-    socket.on("new_post", (post) => setPosts((p) => [post, ...p]));
+    socket.on("new_post", (post) => setPosts((p) => {
+      if (p.find((x) => x.id === post.id)) return p;
+      return [...p, post];
+    }));
     socket.on("delete_post", (id) => setPosts((p) => p.filter((x) => x.id !== id)));
     socket.on("edit_post", ({ postId, content }) => setPosts((p) => p.map(x => x.id === postId ? { ...x, content } : x)));
+    socket.on("post_pinned", ({ postId, isPinned, replaced }) => {
+      setPosts((p) => p.map(x => x.id === postId ? { ...x, isPinned } : x));
+      if (replaced) {
+        setToastMessage("📌 Oldest pinned message replaced.");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
+    });
+    socket.on("post_reaction", ({ postId, username, emoji, removed }: any) => {
+      setPosts((p) =>
+        p.map((post) => {
+          if (post.id !== postId) return post;
+          const reactions = post.reactions || [];
+          if (removed) {
+            return { ...post, reactions: reactions.filter((r: any) => !(r.username === username && r.emoji === emoji)) };
+          } else {
+            const cleaned = reactions.filter((r: any) => r.username !== username);
+            return { ...post, reactions: [...cleaned, { username, emoji }] };
+          }
+        })
+      );
+    });
     return () => {
       socket.off("new_post");
       socket.off("delete_post");
       socket.off("edit_post");
+      socket.off("post_reaction");
     };
   }, []);
 
   useEffect(() => {
     if (!activeChat) return;
-    fetchApi(`/api/messages/${activeChat}`).then(setMessages).catch(console.error);
+
+    const loadMessages = () => {
+      fetchApi(`/api/messages/${activeChat}`)
+        .then((data) => {
+          setMessages(data);
+          scrollToBottom(false);
+          setTimeout(() => scrollToBottom(false), 60);
+          setTimeout(() => scrollToBottom(false), 200);
+        })
+        .catch(console.error);
+    };
+
+    loadMessages();
+
+    const handleSocketReconnect = () => {
+      loadMessages();
+    };
+
+    socket.on("connect", handleSocketReconnect);
+    socket.on("reconnect", handleSocketReconnect);
+
     const handleNewMessage = (msg: any) => {
       console.log('Received new_message:', msg, 'activeChat:', activeChat);
-      if (msg.senderUsername === activeChat || msg.receiverUsername === activeChat) {
+      const recipient = msg.recipientUsername || msg.receiverUsername;
+      if (msg.senderUsername === activeChat || recipient === activeChat) {
         setMessages((m) => {
           if (m.find((x) => x.id === msg.id)) return m;
           return [...m, msg];
@@ -146,7 +230,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           if (removed) {
             return { ...msg, reactions: reactions.filter((r: any) => !(r.username === username && r.emoji === emoji)) };
           } else {
-            return { ...msg, reactions: [...reactions, { username, emoji }] };
+            const cleaned = reactions.filter((r: any) => r.username !== username);
+            return { ...msg, reactions: [...cleaned, { username, emoji }] };
           }
         })
       );
@@ -165,8 +250,12 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
       setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, status } : msg));
     };
 
-    const handleMessagePinned = ({ messageId, isPinned }: any) => {
+    const handleMessagePinned = ({ messageId, isPinned, replaced }: any) => {
       setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, isPinned } : msg));
+      if (replaced) {
+        setToastMessage("📌 Oldest pinned message replaced.");
+        setTimeout(() => setToastMessage(null), 3000);
+      }
     };
 
     const handleEditMessage = ({ messageId, content }: any) => {
@@ -186,6 +275,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     socket.on("delete_message", handleDeleteMessage);
     
     return () => {
+      socket.off("connect", handleSocketReconnect);
+      socket.off("reconnect", handleSocketReconnect);
       socket.off("new_message", handleNewMessage);
       socket.off("message_reaction", handleReaction);
       socket.off("messages_seen", handleMessagesSeen);
@@ -253,65 +344,342 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     const saved = localStorage.getItem('quickEmojis');
     return saved ? JSON.parse(saved) : ['👍', '❤️', '😂', '😮', '😢', '🔥'];
   });
-  const [isCustomizingEmojis, setIsCustomizingEmojis] = useState(false);
-
-  const [activeReactionMsgFull, setActiveReactionMsgFull] = useState<string | null>(null);
-  const [activeMenuMsg, setActiveMenuMsg] = useState<string | null>(null);
-  const [isCustomizing, setIsCustomizing] = useState(false);
-
+  
+    const [activeMenuMsg, setActiveMenuMsg] = useState<string | null>(null);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const isAtBottomRef = useRef(true);
+  const isProgrammaticScrollRef = useRef(false);
+  const targetScrollTopRef = useRef<number | null>(null);
+  const programTimerRef = useRef<any>(null);
+  const activeScrollRafRef = useRef<number | null>(null);
 
+  const updateIsAtBottom = (val: boolean) => {
+    isAtBottomRef.current = val;
+    setIsAtBottom(val);
+  };
+
+  const [unreadCount, setUnreadCount] = useState(0);
+  const prevMessagesLengthRef = useRef(0);
+
+  // Attach user interaction listeners to know when user manually scrolls away
   useEffect(() => {
-    const handleResize = () => {
-      if ((view === 'chat' || activeThread) && messagesEndRef.current) {
-        messagesEndRef.current.scrollIntoView();
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const handleUserInteraction = () => {
+      if (activeScrollRafRef.current !== null) {
+        cancelAnimationFrame(activeScrollRafRef.current);
+        activeScrollRafRef.current = null;
+      }
+      isProgrammaticScrollRef.current = false;
+      if (programTimerRef.current) {
+        clearTimeout(programTimerRef.current);
+        programTimerRef.current = null;
       }
     };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [view, activeThread]);
 
+    container.addEventListener('wheel', handleUserInteraction, { passive: true });
+    container.addEventListener('touchstart', handleUserInteraction, { passive: true });
+    container.addEventListener('pointerdown', handleUserInteraction, { passive: true });
 
+    return () => {
+      container.removeEventListener('wheel', handleUserInteraction);
+      container.removeEventListener('touchstart', handleUserInteraction);
+      container.removeEventListener('pointerdown', handleUserInteraction);
+    };
+  }, [view, activeChat, activeThread]);
+
+  const scrollToBottom = (smooth = true) => {
+    if (activeScrollRafRef.current !== null) {
+      cancelAnimationFrame(activeScrollRafRef.current);
+      activeScrollRafRef.current = null;
+    }
+
+    isProgrammaticScrollRef.current = true;
+    updateIsAtBottom(true);
+
+    if (programTimerRef.current) clearTimeout(programTimerRef.current);
+
+    requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+
+      setUnreadCount(0);
+
+      const calculateTarget = () => {
+        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        return maxScroll;
+      };
+
+      let finalScrollTop = calculateTarget();
+      targetScrollTopRef.current = finalScrollTop;
+
+      const startScrollTop = container.scrollTop;
+      const distance = finalScrollTop - startScrollTop;
+
+      if (!smooth || Math.abs(distance) < 2) {
+        container.scrollTop = finalScrollTop;
+        isProgrammaticScrollRef.current = false;
+        return;
+      }
+
+      // Spring physics parameters for snappy, natural native-like chat auto-scroll
+      const stiffness = 220;
+      const damping = 26;
+      let currentPos = startScrollTop;
+      let velocity = 0;
+      let lastTime = performance.now();
+
+      const animateStep = (now: number) => {
+        finalScrollTop = calculateTarget();
+        targetScrollTopRef.current = finalScrollTop;
+
+        let dt = (now - lastTime) / 1000;
+        lastTime = now;
+        if (dt > 0.064) dt = 0.016; // Guard against frame drops or tab switching
+
+        const displacement = currentPos - finalScrollTop;
+        const springForce = -stiffness * displacement;
+        const dampingForce = -damping * velocity;
+        const acceleration = springForce + dampingForce;
+
+        velocity += acceleration * dt;
+        currentPos += velocity * dt;
+
+        container.scrollTop = currentPos;
+
+        if (Math.abs(currentPos - finalScrollTop) < 0.5 && Math.abs(velocity) < 5) {
+          container.scrollTop = finalScrollTop;
+          activeScrollRafRef.current = null;
+          isProgrammaticScrollRef.current = false;
+        } else {
+          activeScrollRafRef.current = requestAnimationFrame(animateStep);
+        }
+      };
+
+      activeScrollRafRef.current = requestAnimationFrame(animateStep);
+    });
+  };
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    setActiveMenuMsg(null);
+    const container = e.currentTarget;
+
+    if (isProgrammaticScrollRef.current) {
+      if (programTimerRef.current) clearTimeout(programTimerRef.current);
+
+      const isCloseToTarget = targetScrollTopRef.current !== null && 
+        Math.abs(container.scrollTop - targetScrollTopRef.current) <= 4;
+      const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+      const isAtMax = Math.abs(container.scrollTop - maxScroll) <= 4;
+
+      if (isCloseToTarget || isAtMax) {
+        isProgrammaticScrollRef.current = false;
+      } else {
+        programTimerRef.current = setTimeout(() => {
+          isProgrammaticScrollRef.current = false;
+        }, 120);
+        return;
+      }
+    }
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const nearBottom = distanceFromBottom <= 100;
+    updateIsAtBottom(nearBottom);
+    if (nearBottom) {
+      setUnreadCount(0);
+    }
+  };
+
+  // Single requestAnimationFrame-based observer synchronizing scroll container's scrollTop, composer height, and visualViewport
   useEffect(() => {
-    if ((view === 'chat' || activeThread) && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const composerEl = document.getElementById('chat-composer');
+
+    const reconcileScroll = () => {
+      if (!(view === 'chat' || activeThread)) return;
+
+      if (isProgrammaticScrollRef.current) return;
+
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      const nearBottom = distanceFromBottom <= 100;
+
+      if (nearBottom || isAtBottomRef.current) {
+        scrollToBottom(false);
+      }
+    };
+
+    let syncRafId: number | null = null;
+    const scheduleSync = () => {
+      if (syncRafId !== null) cancelAnimationFrame(syncRafId);
+      syncRafId = requestAnimationFrame(() => {
+        syncRafId = null;
+        reconcileScroll();
+      });
+    };
+
+    const observer = new ResizeObserver(scheduleSync);
+    observer.observe(container);
+    if (composerEl) {
+      observer.observe(composerEl);
+    }
+
+    window.addEventListener('resize', scheduleSync);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', scheduleSync);
+      window.visualViewport.addEventListener('scroll', scheduleSync);
+    }
+
+    return () => {
+      if (syncRafId !== null) cancelAnimationFrame(syncRafId);
+      observer.disconnect();
+      window.removeEventListener('resize', scheduleSync);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', scheduleSync);
+        window.visualViewport.removeEventListener('scroll', scheduleSync);
+      }
+    };
+  }, [view, activeChat, activeThread]);
+
+  // WhatsApp-like Smart Auto-scroll
+  useEffect(() => {
+    if (view === 'chat' || activeThread) {
+      const isNewMsgAdded = messages.length > prevMessagesLengthRef.current;
+      const prevLength = prevMessagesLengthRef.current;
+      prevMessagesLengthRef.current = messages.length;
+
+      if (isNewMsgAdded && messages.length > 0) {
+        const lastMsg = messages[messages.length - 1];
+        const isSentByMe = lastMsg && lastMsg.senderUsername === session.username;
+
+        if (isSentByMe || isAtBottomRef.current) {
+          scrollToBottom(true);
+        } else {
+          setUnreadCount(prev => prev + 1);
+        }
+      } else if (messages.length > 0 && prevLength === 0) {
+        // Initial chat load
+        scrollToBottom(false);
+      }
     }
   }, [messages, view, activeThread]);
 
+  useEffect(() => {
+    setUnreadCount(0);
+    updateIsAtBottom(true);
+    prevMessagesLengthRef.current = 0;
+    scrollToBottom(false);
+  }, [activeChat]);
+
+  const [activeReactionPickerId, setActiveReactionPickerId] = useState<string | null>(null);
+  const [activeReactionAnimation, setActiveReactionAnimation] = useState<{ id: string; emoji: string; key: number } | null>(null);
+  const msgLongPressTimerRef = useRef<any>(null);
+  const [activeReactedUsersItem, setActiveReactedUsersItem] = useState<{ id: string; reactions: any[]; isPost: boolean } | null>(null);
+
   const togglePin = async (messageId: string) => {
     try {
-      await fetchApi(`/api/messages/${messageId}/pin`, {
+      const msg = messages.find(m => m.id === messageId);
+      if (!msg) return;
+      const currentPinnedState = msg.isPinned;
+      
+      // Optimistic update
+      setMessages((m) => m.map(m => m.id === messageId ? { ...m, isPinned: currentPinnedState ? 0 : 1 } : m));
+      
+      const res = await fetchApi(`/api/messages/${messageId}/pin`, {
         method: 'POST',
       });
+      if (!res.success) {
+        // Revert on failure
+        setMessages((m) => m.map(m => m.id === messageId ? { ...m, isPinned: currentPinnedState } : m));
+      }
     } catch (err) {
       console.error('Failed to pin:', err);
     }
   };
 
-  const toggleReaction = async (messageId: string, emoji: string) => {
+  const togglePostPin = async (postId: string) => {
     try {
-      const res = await fetchApi(`/api/messages/${messageId}/react`, {
+      const post = posts.find(p => p.id === postId);
+      if (!post) return;
+      const currentPinnedState = post.isPinned;
+      
+      setPosts((p) => p.map(p => p.id === postId ? { ...p, isPinned: currentPinnedState ? 0 : 1 } : p));
+      
+      const res = await fetchApi(`/api/posts/${postId}/pin`, {
+        method: 'POST',
+      });
+      if (!res.success) {
+        setPosts((p) => p.map(p => p.id === postId ? { ...p, isPinned: currentPinnedState } : p));
+      }
+    } catch (err) {
+      console.error('Failed to pin post:', err);
+    }
+  };
+
+  const triggerReactionAnimation = (id: string, emoji: string) => {
+    setActiveReactionAnimation({ id, emoji, key: Date.now() });
+    setTimeout(() => {
+      setActiveReactionAnimation((prev) => (prev?.id === id ? null : prev));
+    }, 900);
+  };
+
+  const toggleMessageReaction = async (messageId: string, emoji: string) => {
+    triggerReactionAnimation(messageId, emoji);
+
+    // Optimistic update
+    setMessages((m) =>
+      m.map((msg) => {
+        if (msg.id !== messageId) return msg;
+        const reactions = msg.reactions || [];
+        const existing = reactions.find((r: any) => r.username === session.username);
+        if (existing && existing.emoji === emoji) {
+          return { ...msg, reactions: reactions.filter((r: any) => r.username !== session.username) };
+        } else {
+          const cleaned = reactions.filter((r: any) => r.username !== session.username);
+          return { ...msg, reactions: [...cleaned, { username: session.username, emoji }] };
+        }
+      })
+    );
+
+    try {
+      await fetchApi(`/api/messages/${messageId}/react`, {
         method: 'POST',
         body: JSON.stringify({ emoji }),
         headers: { 'Content-Type': 'application/json' }
       });
-      
-      if (res.success) {
-        setMessages((m) =>
-          m.map((msg) => {
-            if (msg.id !== messageId) return msg;
-            const reactions = msg.reactions || [];
-            if (res.removed) {
-              return { ...msg, reactions: reactions.filter((r: any) => !(r.username === session.username && r.emoji === emoji)) };
-            } else if (res.reaction) {
-              // avoid duplicate reaction if websocket came first
-              if (reactions.find((r: any) => r.username === res.reaction.username && r.emoji === res.reaction.emoji)) return msg;
-              return { ...msg, reactions: [...reactions, res.reaction] };
-            }
-            return msg;
-          })
-        );
-      }
+    } catch (err) {
+      console.error('Failed to react:', err);
+    }
+  };
+
+  const togglePostReaction = async (postId: string, emoji: string) => {
+    triggerReactionAnimation(postId, emoji);
+
+    // Optimistic update
+    setPosts((p) =>
+      p.map((post) => {
+        if (post.id !== postId) return post;
+        const reactions = post.reactions || [];
+        const existing = reactions.find((r: any) => r.username === session.username);
+        if (existing && existing.emoji === emoji) {
+          return { ...post, reactions: reactions.filter((r: any) => r.username !== session.username) };
+        } else {
+          const cleaned = reactions.filter((r: any) => r.username !== session.username);
+          return { ...post, reactions: [...cleaned, { username: session.username, emoji }] };
+        }
+      })
+    );
+
+    try {
+      await fetchApi(`/api/posts/${postId}/react`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji }),
+        headers: { 'Content-Type': 'application/json' }
+      });
     } catch (err) {
       console.error('Failed to react:', err);
     }
@@ -495,31 +863,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
 
 
-    useEffect(() => {
-    const handleEmojiClick = (e: any) => {
-      const emoji = e.detail;
-      if (isCustomizing) {
-        setQuickEmojis(prev => {
-          let newEmojis;
-          if (prev.length < 6) {
-            newEmojis = [...prev, emoji];
-          } else {
-            newEmojis = [...prev.slice(1), emoji];
-          }
-          localStorage.setItem('quickEmojis', JSON.stringify(newEmojis));
-          return newEmojis;
-        });
-      } else {
-        if (activeReactionMsgFull) {
-          toggleReaction(activeReactionMsgFull, emoji);
-          setActiveReactionMsgFull(null);
-        }
-      }
-    };
-    window.addEventListener('emoji_picker_click', handleEmojiClick);
-    return () => window.removeEventListener('emoji_picker_click', handleEmojiClick);
-  }, [isCustomizing, activeReactionMsgFull]);
-
+  
   useEffect(() => {
     initAuth();
     loadPickerApi(() => undefined);
@@ -684,42 +1028,42 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         </PullToRefresh>
         
         {storageUsage && (
-          <div className="p-4 mt-auto border-t border-white/5">
-            <div className="flex items-center justify-between text-xs text-neutral-400 mb-2">
-              <span>Storage (25GB)</span>
-              <span>{(storageUsage.usageBytes / (1024 * 1024 * 1024)).toFixed(2)} GB used</span>
+          <div className="p-4 mt-auto border-t border-white/10 bg-neutral-900/60 backdrop-blur-md">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center space-x-1.5 text-xs text-neutral-300 font-medium">
+                <Database className="w-3.5 h-3.5 text-blue-400" />
+                <span>Storage</span>
+              </div>
+              <span className="text-xs text-neutral-300 font-semibold tracking-tight">
+                {formatStorageDisplay(storageUsage.usageBytes, storageUsage.limitBytes)}
+              </span>
             </div>
-            <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden mb-3">
-              <div 
+
+            {/* Visual Animated Progress Bar */}
+            <div className="relative w-full bg-neutral-950/80 rounded-full h-2.5 overflow-hidden mb-2.5 border border-white/10 p-[1px] shadow-inner">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ 
+                  width: `${Math.min(100, Math.max(storageUsage.usageBytes > 0 ? 1 : 0, (storageUsage.usageBytes / storageUsage.limitBytes) * 100))}%` 
+                }}
+                transition={{ type: "spring", stiffness: 100, damping: 20 }}
                 className={clsx(
-                  "h-full transition-all duration-500",
-                  (storageUsage.usageBytes / storageUsage.limitBytes) > 0.9 ? "bg-red-500" : "bg-blue-500"
-                )} 
-                style={{ width: `${Math.min(100, (storageUsage.usageBytes / storageUsage.limitBytes) * 100)}%` }}
+                  "h-full rounded-full transition-colors duration-500 relative",
+                  (storageUsage.usageBytes / storageUsage.limitBytes) > 0.9 
+                    ? "bg-gradient-to-r from-red-500 to-rose-600 shadow-[0_0_12px_rgba(239,68,68,0.5)]" 
+                    : (storageUsage.usageBytes / storageUsage.limitBytes) > 0.7
+                    ? "bg-gradient-to-r from-amber-500 to-orange-500 shadow-[0_0_12px_rgba(245,158,11,0.5)]"
+                    : "bg-gradient-to-r from-blue-500 via-indigo-500 to-cyan-400 shadow-[0_0_12px_rgba(59,130,246,0.5)]"
+                )}
               />
             </div>
+
             <button
-              onClick={async () => {
-                if (confirm('Are you sure you want to clear all storage? This will delete all posts and messages.')) {
-                  try {
-                    setStorageUsage({ usageBytes: 0, limitBytes: 25 * 1024 * 1024 * 1024 });
-                    setPosts([]); // Clear posts from UI
-                    setChats([]);
-                    setMessages([]);
-                    setActiveChat(null);
-                    await fetchApi('/api/storage/clear', { method: 'POST' });
-                    setToastMessage('Storage cleared successfully!');
-                    setTimeout(() => setToastMessage(null), 3000);
-                  } catch (err) {
-                    console.error('Failed to clear storage:', err);
-                    alert('Failed to clear storage');
-                  }
-                }
-              }}
-              className="w-full py-1.5 px-3 bg-red-500/10 hover:bg-red-500/20 active:bg-red-500/30 text-red-400 text-xs rounded-md transition-all active:scale-95 flex items-center justify-center gap-2"
+              onClick={() => setShowClearStorageModal(true)}
+              className="w-full py-1.5 px-3 bg-red-500/10 hover:bg-red-500/20 active:bg-red-500/30 text-red-400 text-xs rounded-lg transition-all active:scale-95 flex items-center justify-center gap-2 border border-red-500/20 font-medium"
             >
               <Trash2 className="w-3.5 h-3.5" />
-              Clear Storage
+              <span>Clear Storage</span>
             </button>
           </div>
         )}
@@ -731,53 +1075,75 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         !mobileShowSidebar ? 'flex' : 'hidden md:flex'
       )}>
         {/* Header */}
-        <header className="h-16 flex items-center justify-between gap-6 px-4 md:px-6 border-b border-white/10 flex-shrink-0 bg-neutral-900/50 backdrop-blur-md sticky top-0 z-10">
-          <div className="flex items-center min-w-0 flex-shrink pr-2 md:pr-4">
+        <header className="h-16 flex items-center justify-between gap-2 sm:gap-4 md:gap-6 px-3 sm:px-4 md:px-6 border-b border-white/10 flex-shrink-0 bg-neutral-900/50 backdrop-blur-md sticky top-0 z-10">
+          <div className="flex items-center min-w-0 flex-1 pr-1 sm:pr-3">
             {(view === 'chat' || activeThread || !mobileShowSidebar) && (
               <button 
                 aria-label={activeThread ? "Back to chat" : "Back to menu"}
                 onClick={() => { if (activeThread) setActiveThread(null); else setMobileShowSidebar(true); }}
-                className={clsx("mr-3 p-2 hover:bg-white/10 text-neutral-400 hover:text-white rounded-full transition-colors", !activeThread && "md:hidden")}
+                className={clsx("mr-2 sm:mr-3 p-1.5 sm:p-2 hover:bg-white/10 text-neutral-400 hover:text-white rounded-full transition-colors flex-shrink-0", !activeThread && "md:hidden")}
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
                 </svg>
               </button>
             )}
-            <div className="flex flex-col min-w-0">
-              <h2 className="text-lg font-semibold leading-tight truncate">
+            <div className="flex flex-col min-w-0 flex-1">
+              <h2 className="text-base sm:text-lg font-semibold leading-tight truncate">
                 {activeThread ? 'Thread' : view === 'feed' ? 'Public Feed' : `Chat with ${activeChat}`}
               </h2>
-              {view === 'chat' && typingUsers.length > 0 && (
-                <span className="text-[13px] text-blue-400 font-medium animate-pulse mt-0.5 truncate">
-                  {typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing...
-                </span>
-              )}
             </div>
           </div>
           
-          <div className="relative w-48 md:w-64 flex-shrink-0">
-              <Search className="absolute left-3 top-2 w-4 h-4 text-neutral-500" />
-              <input
-                type="text"
-                placeholder="Global Search..."
-                value={globalSearchQuery}
-                onChange={(e) => {
-                  setGlobalSearchQuery(e.target.value);
-                  if (e.target.value) setView('global_search');
-                  else if (view === 'global_search') setView(activeChat ? 'chat' : 'feed');
-                }}
-                className="w-full bg-white/5 border border-white/10 rounded-full pl-9 pr-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-white/20 transition-all text-sm"
-              />
-            </div>
+          <div className="relative w-28 sm:w-44 md:w-64 flex-shrink-0">
+            <Search className="absolute left-2.5 sm:left-3 top-2.5 w-3.5 h-3.5 sm:w-4 sm:h-4 text-neutral-500 pointer-events-none" />
+            <input
+              type="text"
+              placeholder="Search..."
+              value={globalSearchQuery}
+              onChange={(e) => {
+                setGlobalSearchQuery(e.target.value);
+                if (e.target.value) setView('global_search');
+                else if (view === 'global_search') setView(activeChat ? 'chat' : 'feed');
+              }}
+              className="w-full bg-white/5 border border-white/10 rounded-full pl-8 sm:pl-9 pr-3 py-1 sm:py-1.5 focus:outline-none focus:ring-2 focus:ring-white/20 transition-all text-xs sm:text-sm placeholder:truncate"
+            />
+          </div>
         </header>
+        
+        {view === 'chat' && typingUsers.length > 0 && (
+          <div className="bg-neutral-800/80 border-b border-white/5 px-4 py-1.5 flex items-center space-x-2 shadow-sm z-10 shrink-0">
+            <div className="flex -space-x-1">
+              {typingUsers.slice(0, 3).map((u, i) => (
+                <div key={i} className="w-4 h-4 rounded-full border border-neutral-900 bg-neutral-700 flex items-center justify-center overflow-hidden flex-shrink-0 relative">
+                  {u.avatar ? (
+                    <img src={u.avatar} alt={u.username} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-[8px] font-medium text-white">{u.username.charAt(0).toUpperCase()}</span>
+                  )}
+                  {u.color && (
+                     <div className="absolute inset-0 opacity-20" style={{ backgroundColor: u.color }}></div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="flex space-x-1">
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            <span className="text-xs text-neutral-400 ml-1">
+              {typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing...
+            </span>
+          </div>
+        )}
 
         {/* Pinned Messages Banner */}
         {view === 'chat' && !activeThread && messages.filter((m: any) => !m.parentId && m.isPinned).length > 0 && (
           <div className="flex-shrink-0 bg-neutral-900 border-b border-white/10 p-2 md:px-6 sticky top-0 z-10 shadow-md">
-            <div className="flex space-x-2 overflow-x-auto pb-1 scrollbar-hide">
+            <div className="flex space-x-2 overflow-x-auto overflow-y-hidden pb-2 flex-nowrap custom-scrollbar touch-pan-x" role="region" aria-label="Pinned Messages" tabIndex={0}>
               {messages.filter((m: any) => !m.parentId && m.isPinned).map((msg: any) => (
-                <div key={msg.id} className="flex flex-col bg-neutral-800/50 rounded-lg p-2 min-w-[200px] max-w-[250px] flex-shrink-0 border border-white/5 cursor-pointer hover:bg-neutral-800 transition-colors group relative" onClick={() => {
+                <div key={msg.id} tabIndex={0} aria-label={`View pinned message from ${msg.senderUsername}`} onKeyDown={(e) => { if (e.key === 'Enter') { const el = document.getElementById(`msg-${msg.id}`); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950', 'transition-all'); setTimeout(() => el.classList.remove('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950'), 2000); } } }} className="flex flex-col bg-neutral-800/50 rounded-lg p-2 w-[160px] md:w-[210px] flex-none border border-white/5 cursor-pointer hover:bg-neutral-800 transition-colors group relative focus:outline-none focus:ring-2 focus:ring-blue-500" onClick={() => {
                   const el = document.getElementById(`msg-${msg.id}`);
                   if (el) {
                     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -805,16 +1171,51 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           </div>
         )}
 
+        {/* Pinned Posts Banner */}
+        {view === 'feed' && posts.filter((p: any) => p.isPinned).length > 0 && (
+          <div className="flex-shrink-0 bg-neutral-900 border-b border-white/10 p-2 md:px-6 sticky top-0 z-10 shadow-md">
+            <div className="flex space-x-2 overflow-x-auto overflow-y-hidden pb-2 flex-nowrap custom-scrollbar touch-pan-x" role="region" aria-label="Pinned Posts" tabIndex={0}>
+              {posts.filter((p: any) => p.isPinned).map((post: any) => (
+                <div key={post.id} tabIndex={0} aria-label={`View pinned post from ${post.username}`} onKeyDown={(e) => { if (e.key === 'Enter') { const el = document.getElementById(`post-${post.id}`); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950', 'transition-all'); setTimeout(() => el.classList.remove('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950'), 2000); } } }} className="flex flex-col bg-neutral-800/50 rounded-lg p-2 w-[160px] md:w-[210px] flex-none border border-white/5 cursor-pointer hover:bg-neutral-800 transition-colors group relative focus:outline-none focus:ring-2 focus:ring-blue-500" onClick={() => {
+                  const el = document.getElementById(`post-${post.id}`);
+                  if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    el.classList.add('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950', 'transition-all');
+                    setTimeout(() => el.classList.remove('ring-2', 'ring-blue-500', 'ring-offset-2', 'ring-offset-neutral-950'), 2000);
+                  }
+                }}>
+                  <button 
+                    className="absolute top-1 right-1 p-1 opacity-0 group-hover:opacity-100 hover:bg-white/10 rounded-md transition-all text-neutral-400 hover:text-white"
+                    onClick={(e) => { e.stopPropagation(); togglePostPin(post.id); }}
+                    title="Unpin"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                  <div className="flex items-center space-x-1 text-blue-400 mb-1">
+                    <Pin className="w-3 h-3 fill-current rotate-45" />
+                    <span className="text-[10px] font-medium uppercase tracking-wider">Pinned by {post.username}</span>
+                  </div>
+                  <div className="text-xs text-neutral-300 truncate">
+                    {post.content || (post.fileName ? `File: ${post.fileName}` : 'Pinned post')}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Scrollable Area */}
-        <PullToRefresh 
-          className="px-4 md:px-6 pt-6 pb-4 space-y-6" 
-          onClick={() => setActiveMenuMsg(null)} 
-          onScroll={() => setActiveMenuMsg(null)}
-          onRefresh={async () => {
-            if (view === 'feed') await fetchApi('/api/posts').then(setPosts);
-            else if (view === 'chat' && activeChat) await fetchApi(`/api/messages/${activeChat}`).then(setMessages);
-          }}
-        >
+        <div className="relative flex-1 flex flex-col overflow-hidden">
+          <PullToRefresh 
+            className={clsx("px-3 sm:px-4 md:px-6 pt-4 sm:pt-6 space-y-6", (view === 'chat' || activeThread) ? "pb-0" : "pb-6")} 
+            scrollRef={scrollContainerRef}
+            onClick={() => setActiveMenuMsg(null)} 
+            onScroll={handleScroll}
+            onRefresh={async () => {
+              if (view === 'feed') await fetchApi('/api/posts').then(setPosts);
+              else if (view === 'chat' && activeChat) await fetchApi(`/api/messages/${activeChat}`).then(setMessages);
+            }}
+          >
           <AnimatePresence mode="wait">
           {view === 'global_search' ? (
             <motion.div key="search" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }} className="flex flex-col space-y-6 max-w-2xl mx-auto w-full">
@@ -851,153 +1252,287 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
             </motion.div>
           ) : view === 'feed' ? (
             <motion.div key="feed" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }} className="space-y-6 max-w-2xl mx-auto w-full">
-              {posts.map((post) => (
-                <DissolvingItem 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  key={post.id} 
-                  expiresAt={post.expiresAt}
-                  className="bg-neutral-900 border border-white/10 rounded-2xl p-5 shadow-xl relative group"
-                >
-                  <div className="flex items-center justify-between mb-4 pr-8">
-                    <div className="flex items-center space-x-3">
-                      <div className={clsx("w-10 h-10 rounded-full flex items-center justify-center text-lg", post.color)}>
-                        {post.avatar}
-                      </div>
-                      <div>
-                        <div className="font-medium">{post.username}</div>
-                        <div className="text-xs text-neutral-500">
-                          <Countdown expiresAt={post.expiresAt} />
-                        </div>
-                      </div>
-                    </div>
-                    
-                    {/* Always visible Delete button at top-right corner */}
-                    <button 
-                      aria-label="Delete post"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deletePost(post.id);
-                      }}
-                      className="absolute top-3 right-3 p-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all z-20 flex items-center justify-center hover:scale-110 active:scale-95"
-                      title="Delete post"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
+              {(() => {
+                const parseTime = (dateStr: any) => {
+                  if (!dateStr) return 0;
+                  if (typeof dateStr === 'number') return dateStr;
+                  if (dateStr instanceof Date) return dateStr.getTime();
+                  const str = String(dateStr).trim();
+                  const normalized = str.replace(' ', 'T');
+                  const iso = (!normalized.includes('Z') && !normalized.includes('+')) ? normalized + 'Z' : normalized;
+                  const time = new Date(iso).getTime();
+                  return isNaN(time) ? 0 : time;
+                };
 
-                  {/* Original post text remains visible */}
-                  {post.content && (
-                    <p className="text-neutral-200 text-[15px] leading-relaxed mb-4 whitespace-pre-wrap break-words">{post.content}</p>
-                  )}
-                  {post.fileUrl && (
-                    <div className="rounded-xl overflow-hidden bg-neutral-950 border border-white/5 mb-3">
-                      {post.fileType?.startsWith('image/') ? (
-                        <img loading="lazy" src={post.fileUrl} alt="attachment" className="w-full max-h-96 object-cover cursor-pointer" onClick={() => setViewingFile({ url: post.fileUrl, type: post.fileType, name: post.fileName })} />
-                      ) : post.fileType?.startsWith('audio/') ? (
-                        <div className="p-4">
-                          <AudioPlayer src={post.fileUrl} />
+                const sortedPosts = [...posts].sort((a, b) => {
+                  const timeA = parseTime(a.createdAt);
+                  const timeB = parseTime(b.createdAt);
+                  if (timeA !== timeB) return timeA - timeB;
+                  return (a.id || '').localeCompare(b.id || '');
+                });
+
+                return sortedPosts.map((post) => (
+                  <DissolvingItem 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    key={post.id} 
+                    expiresAt={post.expiresAt}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setActiveReactionPickerId(activeReactionPickerId === post.id ? null : post.id);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      const defaultEmoji = getCustomReactions()[0] || '😀';
+                      togglePostReaction(post.id, defaultEmoji);
+                    }}
+                    onTouchStart={() => {
+                      msgLongPressTimerRef.current = setTimeout(() => {
+                        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+                          try { navigator.vibrate(30); } catch(e){}
+                        }
+                        setActiveReactionPickerId(post.id);
+                      }, 380);
+                    }}
+                    onTouchEnd={() => {
+                      if (msgLongPressTimerRef.current) {
+                        clearTimeout(msgLongPressTimerRef.current);
+                        msgLongPressTimerRef.current = null;
+                      }
+                    }}
+                    onTouchMove={() => {
+                      if (msgLongPressTimerRef.current) {
+                        clearTimeout(msgLongPressTimerRef.current);
+                        msgLongPressTimerRef.current = null;
+                      }
+                    }}
+                    id={`post-${post.id}`}
+                    className="bg-neutral-900 border border-white/10 rounded-2xl p-5 shadow-xl relative group select-none cursor-pointer transition-all"
+                  >
+                    {/* Reaction Particle Burst Animation */}
+                    {activeReactionAnimation?.id === post.id && (
+                      <AnimatePresence>
+                        <motion.div
+                          key={activeReactionAnimation.key}
+                          initial={{ opacity: 1, scale: 0.5, y: 0 }}
+                          animate={{ opacity: 0, scale: 2.2, y: -65 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.75, ease: "easeOut" }}
+                          className="absolute -top-6 left-1/2 -translate-x-1/2 text-4xl pointer-events-none z-50 select-none drop-shadow-[0_8px_16px_rgba(0,0,0,0.5)]"
+                        >
+                          {activeReactionAnimation.emoji}
+                        </motion.div>
+                      </AnimatePresence>
+                    )}
+
+                    <div className="flex items-center justify-between mb-4 pr-8">
+                      <div className="flex items-center space-x-3">
+                        <div className={clsx("w-10 h-10 rounded-full flex items-center justify-center text-lg", post.color)}>
+                          {post.avatar}
                         </div>
-                      ) : (
-                        <div className="p-4 flex items-center space-x-3">
-                          <div className="p-3 bg-white/5 rounded-lg">
-                            <Globe className="w-6 h-6" />
+                        <div>
+                          <div className="font-medium">{post.username}</div>
+                          <div className="text-xs text-neutral-500">
+                            <Countdown expiresAt={post.expiresAt} />
                           </div>
-                          <button onClick={() => setViewingFile({ url: post.fileUrl, type: post.fileType, name: post.fileName })} className="text-blue-400 hover:underline flex items-center space-x-2 text-left">
-                              <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                              <span className="truncate">{post.fileName}</span>
-                            </button>
                         </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Separate Editable Input Field */}
-                  {editingMessageId === post.id && (
-                    <div className="mt-2 mb-3 p-2.5 bg-neutral-950 border border-white/15 rounded-xl space-y-2 w-full shadow-xl text-left">
-                      <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
-                        Edit Post
                       </div>
-                      <textarea
-                        value={editMessageContent}
-                        onChange={(e) => setEditMessageContent(e.target.value)}
-                        onClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            saveEdit(post.id);
-                          } else if (e.key === 'Escape') {
-                            setEditingMessageId(null);
-                            setEditMessageContent('');
-                          }
-                        }}
-                        className="w-full p-2 text-sm bg-neutral-900 border border-white/20 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 resize-none"
-                        rows={2}
-                        autoFocus
-                      />
-                      <div className="flex justify-end space-x-2">
+                      
+                      {/* Top-right actions (Pin and Delete) */}
+                      <div className="absolute top-3 right-3 flex items-center space-x-1.5 z-20">
                         <button
-                          type="button"
-                          onClick={() => {
-                            setEditingMessageId(null);
-                            setEditMessageContent('');
+                          aria-label={post.isPinned ? "Unpin post" : "Pin post"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePostPin(post.id);
                           }}
-                          className="px-3 py-1.5 text-xs text-neutral-300 hover:text-white bg-white/10 hover:bg-white/20 rounded-md transition-colors"
+                          className={clsx(
+                            "p-1.5 border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95",
+                            post.isPinned 
+                              ? "bg-blue-600/80 hover:bg-blue-600 text-white" 
+                              : "bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white"
+                          )}
+                          title={post.isPinned ? "Unpin post" : "Pin post"}
                         >
-                          Cancel
+                          {post.isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => saveEdit(post.id)}
-                          className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded-md font-medium transition-colors shadow-sm"
+                        <button 
+                          aria-label="Delete post"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deletePost(post.id);
+                          }}
+                          className="p-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95"
+                          title="Delete post"
                         >
-                          Save
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
-                  )}
 
-                  {/* Always visible Copy & Edit Buttons right-aligned at bottom-right corner */}
-                  <div className="flex items-center justify-end space-x-2 mt-2 pt-2 border-t border-white/5 w-full">
-                    <button 
-                      aria-label="Copy post text"
-                      onClick={() => copyMessage(post.id, post.content || post.fileName || '')}
-                      className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-950/60 shadow-sm"
-                      title="Copy post text"
-                    >
-                      {copiedMessageId === post.id ? (
-                        <Check className="w-3.5 h-3.5 text-green-400 transition-all scale-110" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5 transition-all" />
-                      )}
-                      <span>Copy</span>
-                    </button>
-                    <button 
-                      aria-label="Edit post"
-                      onClick={() => startEditing(post)}
-                      className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-950/60 shadow-sm"
-                      title="Edit post"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                      <span>Edit</span>
-                    </button>
+                    {/* Original post text remains visible */}
+                    {post.content && (
+                      <p className="text-neutral-200 text-[15px] leading-relaxed mb-2 whitespace-pre-wrap break-words">
+                        {post.content}
+                        {post.isEdited === 1 && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
+                        {!!post.isPinned && <span className="text-[10px] ml-2 inline-flex items-center text-blue-400"><Pin className="w-2.5 h-2.5 mr-0.5" fill="currentColor" /></span>}
+                      </p>
+                    )}
+                    {post.fileUrl && (
+                      <FileAttachmentView
+                        fileUrl={post.fileUrl}
+                        fileName={post.fileName}
+                        fileType={post.fileType}
+                        fileSize={post.fileSize}
+                        onPreview={() => setViewingFile({ url: post.fileUrl, type: post.fileType, name: post.fileName })}
+                        className="mb-3"
+                      />
+                    )}
+                    {!!post.isPinned && (
+                      <div className="flex items-center space-x-1 mt-2 mb-2 opacity-80 text-blue-400">
+                        <Pin className="w-2.5 h-2.5" fill="currentColor" />
+                        <span className="text-[9px] font-medium tracking-wider uppercase">Pinned</span>
+                      </div>
+                    )}
+
+                    {/* Separate Editable Input Field */}
+                    {editingMessageId === post.id && (
+                      <div className="mt-2 mb-3 p-2.5 bg-neutral-950 border border-white/15 rounded-xl space-y-2 w-full shadow-xl text-left">
+                        <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
+                          Edit Post
+                        </div>
+                        <textarea
+                          value={editMessageContent}
+                          onChange={(e) => setEditMessageContent(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              saveEdit(post.id);
+                            } else if (e.key === 'Escape') {
+                              setEditingMessageId(null);
+                              setEditMessageContent('');
+                            }
+                          }}
+                          className="w-full p-2 text-sm bg-neutral-900 border border-white/20 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 resize-none"
+                          rows={2}
+                          autoFocus
+                        />
+                        <div className="flex justify-end space-x-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingMessageId(null);
+                              setEditMessageContent('');
+                            }}
+                            className="px-3 py-1.5 text-xs text-neutral-300 hover:text-white bg-white/10 hover:bg-white/20 rounded-md transition-colors"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => saveEdit(post.id)}
+                            className="px-3 py-1.5 text-xs text-white bg-blue-600 hover:bg-blue-500 rounded-md font-medium transition-colors shadow-sm"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Reaction Bubble Pills */}
+                    <ReactionBubblePill
+                      reactions={post.reactions || []}
+                      currentUsername={session.username}
+                      onToggleEmoji={(emoji) => togglePostReaction(post.id, emoji)}
+                      onOpenUsersModal={() => setActiveReactedUsersItem({ id: post.id, reactions: post.reactions || [], isPost: true })}
+                    />
+
+                    {/* Actions Row */}
+                    <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5 w-full relative">
+                      {/* Floating Reaction Picker Popup */}
+                      <ReactionPickerPopup
+                        isOpen={activeReactionPickerId === post.id}
+                        onSelectEmoji={(emoji) => togglePostReaction(post.id, emoji)}
+                        onClose={() => setActiveReactionPickerId(null)}
+                        align="left"
+                        onPin={() => togglePostPin(post.id)}
+                        isPinned={!!post.isPinned}
+                      />
+
+                      <div className="flex items-center space-x-2 ml-auto">
+                      <button 
+                        aria-label="Copy post text"
+                        onClick={() => copyMessage(post.id, post.content || post.fileName || '')}
+                        className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-950/60 shadow-sm"
+                        title="Copy post text"
+                      >
+                        {copiedMessageId === post.id ? (
+                          <Check className="w-3.5 h-3.5 text-green-400 transition-all scale-110" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5 transition-all" />
+                        )}
+                        <span>Copy</span>
+                      </button>
+                      <button 
+                        aria-label="Edit post"
+                        onClick={() => startEditing(post)}
+                        className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-950/60 shadow-sm"
+                        title="Edit post"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span>Edit</span>
+                      </button>
+                    </div>
                   </div>
                 </DissolvingItem>
-              ))}
+                ));
+              })()}
               {posts.length === 0 && (
                 <div className="text-center text-neutral-500 py-12">No posts yet. Be the first to share!</div>
               )}
             </motion.div>
           ) : (
-            <motion.div key={activeThread ? `thread-${activeThread.id}` : `chat-${activeChat}`} initial={{ opacity: 0, x: activeThread ? 20 : -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: activeThread ? -20 : 20 }} transition={{ duration: 0.2 }} className="flex flex-col space-y-4 max-w-3xl mx-auto w-full">
+            <motion.div key={activeThread ? `thread-${activeThread.id}` : `chat-${activeChat}`} data-messages-list="true" initial={{ opacity: 0, x: activeThread ? 20 : -20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: activeThread ? -20 : 20 }} transition={{ duration: 0.2 }} className="flex flex-col justify-end min-h-full space-y-4 max-w-3xl mx-auto w-full pb-4 pt-4">
               {(() => {
+                const parseTime = (dateStr: any) => {
+                  if (!dateStr) return 0;
+                  if (typeof dateStr === 'number') return dateStr;
+                  if (dateStr instanceof Date) return dateStr.getTime();
+                  const normalized = typeof dateStr === 'string' ? dateStr.replace(' ', 'T') : String(dateStr);
+                  const iso = typeof normalized === 'string' && !normalized.includes('Z') && !normalized.includes('+') ? normalized + 'Z' : normalized;
+                  const time = new Date(iso).getTime();
+                  return isNaN(time) ? 0 : time;
+                };
+
+                const rawMessages = messages.filter((msg: any) => !msg.parentId && (chatSearchQuery === '' || msg.content?.toLowerCase().includes(chatSearchQuery.toLowerCase()) || msg.fileName?.toLowerCase().includes(chatSearchQuery.toLowerCase())));
+
+                const threadReplies = activeThread
+                  ? messages
+                      .filter((m: any) => m.parentId === activeThread.id)
+                      .sort((a: any, b: any) => {
+                        const timeA = parseTime(a.createdAt);
+                        const timeB = parseTime(b.createdAt);
+                        if (timeA !== timeB) return timeA - timeB;
+                        return (a.id || '').localeCompare(b.id || '');
+                      })
+                  : [];
+
                 const displayedMessages = activeThread
-                  ? [activeThread, ...messages.filter((m: any) => m.parentId === activeThread.id)]
-                  : messages.filter((msg: any) => !msg.parentId && (chatSearchQuery === '' || msg.content?.toLowerCase().includes(chatSearchQuery.toLowerCase()) || msg.fileName?.toLowerCase().includes(chatSearchQuery.toLowerCase())));
-                return displayedMessages.map((msg: any) => {
+                  ? [activeThread, ...threadReplies]
+                  : [...rawMessages].sort((a: any, b: any) => {
+                      const timeA = parseTime(a.createdAt);
+                      const timeB = parseTime(b.createdAt);
+                      if (timeA !== timeB) return timeA - timeB;
+                      return (a.id || '').localeCompare(b.id || '');
+                    });
+
+                return displayedMessages.map((msg: any, index: number) => {
+                const isLast = index === displayedMessages.length - 1;
                 const isMe = msg.senderUsername === session.username;
                 const isThreadParent = activeThread?.id === msg.id;
                 const replyCount = messages.filter((m: any) => m.parentId === msg.id).length;
+                const parentMsg = msg.parentId ? messages.find((m: any) => m.id === msg.parentId) : null;
                 
                 // Group reactions by emoji
                 const reactionCounts: Record<string, { count: number, reacted: boolean }> = {};
@@ -1011,97 +1546,227 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                   <DissolvingItem 
                     key={msg.id} 
                     id={`msg-${msg.id}`}
+                    data-last-message={isLast ? "true" : undefined}
                     expiresAt={msg.expiresAt}
                     initial={{ opacity: 0, x: isMe ? 20 : -20, scale: 0.95 }}
                     animate={{ opacity: 1, x: 0, scale: 1 }}
                     transition={{ duration: 0.3, ease: 'easeOut' }}
-                    className={clsx("flex flex-col max-w-[80%] group relative", isMe ? "self-end items-end" : "self-start items-start")}
+                    className={clsx(
+                      "flex flex-col max-w-[80%] group relative transition-all duration-200",
+                      isMe ? "self-end items-end" : "self-start items-start",
+                      activeReactionPickerId === msg.id && "z-50 scale-[1.03]"
+                    )}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       setActiveMenuMsg(activeMenuMsg === msg.id ? null : msg.id);
                     }}
                   >
-                    <div className={clsx("flex items-end space-x-2 relative pt-2", isMe && "flex-row-reverse space-x-reverse")}>
+                    <div className="relative w-full overflow-visible">
+                      {/* Swipe to reply indicator */}
                       <div 
-                        onDoubleClick={(e) => {
-                          e.preventDefault();
-                          toggleReaction(msg.id, quickEmojis[0] || '❤️');
-                        }}
-                        className={clsx(
-                          "px-4 py-2.5 rounded-2xl text-[15px] relative transition-transform group/bubble", editingMessageId !== msg.id && "active:scale-[0.98]",
-                          isMe ? "bg-white text-black rounded-br-sm" : "bg-neutral-800 text-white rounded-bl-sm"
-                        )}
+                        id={`reply-icon-${msg.id}`}
+                        className="absolute left-0 top-1/2 -translate-y-1/2 z-10 opacity-0 pointer-events-none transition-all flex items-center justify-center w-8 h-8 rounded-full bg-blue-600 text-white shadow-lg border border-white/20"
                       >
-                        {/* Always visible Delete button positioned at the top-right corner of every message */}
-                        <button
-                          aria-label="Delete message"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteMessage(msg.id);
-                          }}
-                          className="absolute -top-2 -right-2 p-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all z-20 flex items-center justify-center hover:scale-110 active:scale-95"
-                          title="Delete message"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-
-                        {/* Original message content remains visible */}
-                        {msg.content && (
-                          <div className="whitespace-pre-wrap break-words">
-                            {highlightText(msg.content, chatSearchQuery)}
-                            {msg.isEdited === 1 && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
-                          </div>
-                        )}
-                        {msg.fileUrl && (
-                          <div className="mt-2 rounded-lg overflow-hidden">
-                            {msg.fileType?.startsWith('image/') ? (
-                              <img loading="lazy" src={msg.fileUrl} alt="attachment" className="max-w-full max-h-96 object-contain rounded-md cursor-pointer" onClick={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })} />
-                            ) : msg.fileType?.startsWith('audio/') ? (
-                              <AudioPlayer src={msg.fileUrl} />
-                            ) : (
-                              <button onClick={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })} className="underline opacity-80 hover:opacity-100 flex items-center space-x-2 text-left">
-                                <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                                <span className="truncate">{msg.fileName}</span>
-                              </button>
-                            )}
-                          </div>
-                        )}
+                        <Reply className="w-4 h-4" />
                       </div>
-                      
-                      {/* Quick Actions (Reactions) */}
-                      <div className={clsx("opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-0 mb-1 flex items-center space-x-1", isMe ? "right-full mr-2" : "left-full ml-2")}>
-                        {/* Desktop Hover Row & Mobile Tap Row */}
-                        <div className={clsx("absolute bottom-full mb-2 items-center bg-[#262626] px-1.5 py-1.5 rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.5)] z-50 transition-all", activeMenuMsg === msg.id ? "flex opacity-100 translate-y-0" : "hidden", isMe ? "right-0" : "left-0")}>
-                          {Array.from(new Set(quickEmojis)).slice(0, 6).map((emoji: any) => (
-                            <button 
-                              key={emoji}
-                              aria-label={`React with ${emoji}`}
-                              onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, emoji); setActiveMenuMsg(null); }}
-                              className="w-9 h-9 flex items-center justify-center hover:bg-white/5 rounded-full text-[22px] transition-transform hover:scale-110 active:scale-75 transform"
+
+                      <motion.div
+                        drag="x"
+                        dragConstraints={{ left: 0, right: 100 }}
+                        dragElastic={0.25}
+                        dragSnapToOrigin={true}
+                        onDrag={(_, info) => {
+                          const replyIcon = document.getElementById(`reply-icon-${msg.id}`);
+                          if (replyIcon) {
+                            if (info.offset.x > 15) {
+                              replyIcon.style.opacity = Math.min(1, (info.offset.x - 15) / 45).toString();
+                              replyIcon.style.transform = `translateY(-50%) scale(${Math.min(1.2, 0.7 + info.offset.x / 80)})`;
+                            } else {
+                              replyIcon.style.opacity = '0';
+                            }
+                          }
+                        }}
+                        onDragEnd={(_, info) => {
+                          const replyIcon = document.getElementById(`reply-icon-${msg.id}`);
+                          if (replyIcon) {
+                            replyIcon.style.opacity = '0';
+                          }
+                          if (info.offset.x > 50 || info.velocity.x > 250) {
+                            setReplyToMessage(msg);
+                          }
+                        }}
+                        className={clsx("flex items-end space-x-2 relative pt-2 touch-pan-y", isMe && "flex-row-reverse space-x-reverse")}
+                      >
+                        <div 
+                          onTouchStart={() => {
+                            msgLongPressTimerRef.current = setTimeout(() => {
+                              if (typeof navigator !== 'undefined' && navigator.vibrate) {
+                                try { navigator.vibrate(35); } catch(e){}
+                              }
+                              setActiveReactionPickerId(msg.id);
+                            }, 380);
+                          }}
+                          onTouchEnd={() => {
+                            if (msgLongPressTimerRef.current) {
+                              clearTimeout(msgLongPressTimerRef.current);
+                              msgLongPressTimerRef.current = null;
+                            }
+                          }}
+                          onTouchMove={() => {
+                            if (msgLongPressTimerRef.current) {
+                              clearTimeout(msgLongPressTimerRef.current);
+                              msgLongPressTimerRef.current = null;
+                            }
+                          }}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setActiveReactionPickerId(activeReactionPickerId === msg.id ? null : msg.id);
+                          }}
+                          onDoubleClick={(e) => {
+                            e.preventDefault();
+                            const defaultEmoji = getCustomReactions()[0] || '😀';
+                            toggleMessageReaction(msg.id, defaultEmoji);
+                          }}
+                          className={clsx(
+                            "px-4 py-2.5 rounded-2xl text-[15px] relative transition-all group/bubble select-none cursor-pointer", 
+                            editingMessageId !== msg.id && "active:scale-[0.98]",
+                            isMe ? "bg-white text-black rounded-br-sm" : "bg-neutral-800 text-white rounded-bl-sm",
+                            activeReactionPickerId === msg.id && "ring-2 ring-blue-500/80 shadow-2xl scale-[1.03]"
+                          )}
+                        >
+                          {/* Reaction Particle Burst Animation */}
+                          {activeReactionAnimation?.id === msg.id && (
+                            <AnimatePresence>
+                              <motion.div
+                                key={activeReactionAnimation.key}
+                                initial={{ opacity: 1, scale: 0.5, y: 0 }}
+                                animate={{ opacity: 0, scale: 2.2, y: -65 }}
+                                exit={{ opacity: 0 }}
+                                transition={{ duration: 0.75, ease: "easeOut" }}
+                                className="absolute -top-6 left-1/2 -translate-x-1/2 text-4xl pointer-events-none z-50 select-none drop-shadow-[0_8px_16px_rgba(0,0,0,0.5)]"
+                              >
+                                {activeReactionAnimation.emoji}
+                              </motion.div>
+                            </AnimatePresence>
+                          )}
+
+                          {/* Reaction Picker Popup */}
+                          <ReactionPickerPopup
+                            isOpen={activeReactionPickerId === msg.id}
+                            onSelectEmoji={(emoji) => toggleMessageReaction(msg.id, emoji)}
+                            onClose={() => setActiveReactionPickerId(null)}
+                            isMe={isMe}
+                            isPinned={!!msg.isPinned}
+                            onPin={() => togglePin(msg.id)}
+                          />
+
+                          {/* Top-right actions (Pin and Delete) */}
+                          <div className="absolute -top-2 -right-2 flex items-center space-x-1.5 z-20">
+                            <button
+                              aria-label={msg.isPinned ? "Unpin message" : "Pin message"}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                togglePin(msg.id);
+                              }}
+                              className={clsx(
+                                "p-1.5 border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95",
+                                msg.isPinned 
+                                  ? "bg-blue-600/80 hover:bg-blue-600 text-white" 
+                                  : "bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white"
+                              )}
+                              title={msg.isPinned ? "Unpin message" : "Pin message"}
                             >
-                              {emoji}
+                              {msg.isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                             </button>
-                          ))}
-                          <div className="w-[1px] h-6 bg-white/10 mx-1.5"></div>
-                          <button 
-                            aria-label="More reactions"
-                            onClick={(e) => { e.stopPropagation(); setActiveReactionMsgFull(msg.id); setIsCustomizing(false); setActiveMenuMsg(null); }}
-                            className="w-9 h-9 flex items-center justify-center bg-white/10 hover:bg-white/20 rounded-full text-neutral-400 hover:text-white transition-colors ml-0.5"
-                          >
-                            <Plus className="w-5 h-5" />
-                          </button>
+                            <button
+                              aria-label="Delete message"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteMessage(msg.id);
+                              }}
+                              className="p-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95"
+                              title="Delete message"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {/* Quote preview of Parent Message if replied */}
+                          {parentMsg && (
+                            <div 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const parentEl = document.getElementById(`msg-${parentMsg.id}`);
+                                if (parentEl) {
+                                  parentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                  parentEl.classList.add('ring-2', 'ring-blue-500', 'transition-all');
+                                  setTimeout(() => parentEl.classList.remove('ring-2', 'ring-blue-500'), 1500);
+                                }
+                              }}
+                              className={clsx(
+                                "mb-2 p-2 rounded-xl text-xs cursor-pointer border-l-3 transition-all hover:brightness-110 select-none text-left",
+                                isMe ? "bg-black/15 border-blue-600 text-neutral-800" : "bg-white/10 border-blue-400 text-neutral-200"
+                              )}
+                            >
+                              <div className="font-semibold text-[11px] text-blue-400 flex items-center space-x-1 mb-0.5">
+                                <Reply className="w-3 h-3" />
+                                <span>@{parentMsg.senderUsername}</span>
+                              </div>
+                              <div className="truncate opacity-80 text-[11px] font-normal">
+                                {parentMsg.content || parentMsg.fileName || (parentMsg.fileUrl ? 'Media attachment' : 'Message')}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Original message content remains visible */}
+                          {msg.content && (
+                            <div className="whitespace-pre-wrap break-words">
+                              {highlightText(msg.content, chatSearchQuery)}
+                              {msg.isEdited === 1 && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
+                            </div>
+                          )}
+                          {msg.fileUrl && (
+                            <FileAttachmentView
+                              fileUrl={msg.fileUrl}
+                              fileName={msg.fileName}
+                              fileType={msg.fileType}
+                              fileSize={msg.fileSize}
+                              onPreview={() => setViewingFile({ url: msg.fileUrl, type: msg.fileType, name: msg.fileName })}
+                            />
+                          )}
+                          {!!msg.isPinned && (
+                            <div className={clsx("flex items-center space-x-1 mt-1 opacity-80", isMe ? "justify-end text-blue-600" : "justify-start text-blue-400")}>
+                              <Pin className="w-2.5 h-2.5" fill="currentColor" />
+                              <span className="text-[9px] font-medium tracking-wider uppercase">Pinned</span>
+                            </div>
+                          )}
                         </div>
                         
-                        <button 
-                          aria-label={msg.isPinned ? "Unpin message" : "Pin message"}
-                          onClick={() => togglePin(msg.id)}
-                          className={clsx("p-1.5 rounded-full shadow-md border border-white/10 transition-colors", msg.isPinned ? "text-blue-400 bg-blue-900/20 border-blue-500/30" : "text-neutral-500 hover:text-white bg-neutral-900")}
-                          title={msg.isPinned ? "Unpin message" : "Pin message"}
-                        >
-                          {msg.isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
-                        </button>
-                      </div>
+                        {/* Action trigger button beside message on hover / tap */}
+                        <div className={clsx("opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-1 z-20", isMe ? "right-full mr-1.5" : "left-full ml-1.5")}>
+                          <button 
+                            aria-label="Reply to message"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setReplyToMessage(msg);
+                            }}
+                            className="p-1.5 rounded-full text-neutral-400 hover:text-blue-400 hover:bg-white/10 transition-colors"
+                            title="Reply"
+                          >
+                            <Reply className="w-4.5 h-4.5" />
+                          </button>
+                        </div>
+                      </motion.div>
                     </div>
+
+                    {/* Reaction Bubble Pills below message */}
+                    <ReactionBubblePill
+                      reactions={msg.reactions || []}
+                      currentUsername={session.username}
+                      onToggleEmoji={(emoji) => toggleMessageReaction(msg.id, emoji)}
+                      onOpenUsersModal={() => setActiveReactedUsersItem({ id: msg.id, reactions: msg.reactions || [], isPost: false })}
+                      isMe={isMe}
+                    />
 
                     {/* Separate Editable Input Field (rendered while preserving original message) */}
                     {editingMessageId === msg.id && (
@@ -1174,26 +1839,6 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                       </button>
                     </div>
 
-                    {/* Reactions Display */}
-                    {Object.keys(reactionCounts).length > 0 && (
-                      <div className={clsx("flex flex-wrap gap-1 mt-1 z-10", isMe ? "justify-end mr-2" : "justify-start ml-2")}>
-                        {Object.entries(reactionCounts).map(([emoji, { count, reacted }]) => (
-                          <button
-                            key={emoji}
-                            aria-label={`React with ${emoji}`}
-                            onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, emoji); setActiveMenuMsg(null); }}
-                            className={clsx(
-                              "flex items-center space-x-1 text-[11px] px-2 py-0.5 rounded-full border border-white/10 transition-transform active:scale-90",
-                              reacted ? "bg-white/20 text-white" : "bg-neutral-900 text-neutral-300 hover:bg-white/10"
-                            )}
-                          >
-                            <span>{emoji}</span>
-                            <span className="font-medium">{count}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
                     <div className="text-[10px] text-neutral-500 mt-1 flex items-center space-x-1.5">
                       {msg.isPinned && (
                         <div className="flex items-center text-blue-400" title="Pinned message">
@@ -1241,14 +1886,32 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                 );
               });
               })()}
-              <div ref={messagesEndRef} />
+              <div ref={messagesEndRef} className="h-0 w-full pointer-events-none flex-shrink-0" />
             </motion.div>
           )}
           </AnimatePresence>
         </PullToRefresh>
+
+        {/* Floating WhatsApp-style New Messages / Scroll to Bottom Indicator */}
+        <AnimatePresence>
+          {view === 'chat' && (!isAtBottom || unreadCount > 0) && (
+            <motion.button
+              initial={{ opacity: 0, y: 10, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.9 }}
+              transition={{ duration: 0.12 }}
+              onClick={() => scrollToBottom(true)}
+              className="absolute right-4 sm:right-6 bottom-4 z-30 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white px-3.5 py-2 rounded-full shadow-2xl border border-white/20 flex items-center space-x-2 text-xs font-semibold cursor-pointer active:scale-95 transition-all"
+            >
+              <ChevronDown className="w-4 h-4 animate-bounce" />
+              <span>{unreadCount > 0 ? `${unreadCount} new message${unreadCount > 1 ? 's' : ''}` : 'Latest messages'}</span>
+            </motion.button>
+          )}
+        </AnimatePresence>
+        </div>
         {/* Composer Footer */}
         {view !== 'global_search' && (
-        <div className="w-full flex-shrink-0 p-2 md:p-4 pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:pb-4 bg-neutral-950 border-t border-white/5 z-20">
+        <div data-composer="true" id="chat-composer" className="w-full flex-shrink-0 p-2 md:p-4 pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:pb-4 bg-neutral-950 border-t border-white/10 shadow-[0_-4px_20px_rgba(0,0,0,0.5)] z-20">
           <div className="max-w-3xl mx-auto relative">
             <AnimatePresence>
               {audioDraft && (
@@ -1328,12 +1991,15 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               view={view}
               activeChat={activeChat}
               parentId={activeThread?.id}
+              replyToMessage={replyToMessage}
+              setReplyToMessage={setReplyToMessage}
               session={session}
               file={file}
               setFile={setFile}
               openCustomCamera={openCustomCamera}
               handleMicClick={handleMicClick}
               setToastMessage={setToastMessage}
+              onMessageSent={() => scrollToBottom(true)}
             />
           </div>
         </div>
@@ -1427,86 +2093,74 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         )}
 
       </AnimatePresence>
-            {/* Full Emoji Picker & Customization Modal */}
+            
+
       <AnimatePresence>
-        {activeReactionMsgFull && (
+        {showClearStorageModal && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[150] flex flex-col justify-end sm:items-center sm:justify-center bg-black/60 backdrop-blur-sm sm:p-4"
-            onClick={() => { setActiveReactionMsgFull(null); setIsCustomizing(false); }}
+            className="fixed inset-0 z-[200] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setShowClearStorageModal(false)}
           >
-            <motion.div 
-              initial={{ y: "100%" }}
-              animate={{ y: 0 }}
-              exit={{ y: "100%" }}
-              transition={{ type: "spring", damping: 25, stiffness: 300 }}
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-neutral-900 border border-white/15 rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4"
               onClick={(e) => e.stopPropagation()}
-              className="bg-neutral-900 border-t sm:border border-white/10 sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col w-full sm:max-w-sm"
-              style={{ maxHeight: "85vh" }}
             >
-              <div className="p-4 flex items-center justify-between">
-                <h3 className="font-semibold text-lg text-white">Your reactions</h3>
-                <button 
-                  onClick={() => setIsCustomizing(!isCustomizing)} 
-                  className={clsx("text-sm font-medium", isCustomizing ? "text-blue-400" : "text-blue-500 hover:text-blue-400")}
-                >
-                  {isCustomizing ? "Done" : "Customize"}
-                </button>
-              </div>
-              
-              <div className="px-4 pb-4 border-b border-white/10">
-                {isCustomizing && <p className="text-xs text-neutral-400 mb-2">Click an emoji to remove it, or pick below to add.</p>}
-                <div className="flex items-center justify-between space-x-1">
-                  {quickEmojis.map((emoji, idx) => (
-                    <button 
-                      key={idx}
-                      aria-label={isCustomizing ? `Remove ${emoji} from quick reactions` : `React with ${emoji}`}
-                      onClick={() => {
-                        if (isCustomizing) {
-                          const newEmojis = quickEmojis.filter((_, i) => i !== idx);
-                          setQuickEmojis(newEmojis);
-                          localStorage.setItem('quickEmojis', JSON.stringify(newEmojis));
-                        } else {
-                          toggleReaction(activeReactionMsgFull, emoji);
-                          setActiveReactionMsgFull(null);
-                        }
-                      }}
-                      className={clsx(
-                        "w-11 h-11 flex items-center justify-center rounded-full text-2xl transition-all transform active:scale-90",
-                        isCustomizing ? "bg-neutral-800 hover:bg-neutral-700 border border-white/5 relative group" : "hover:bg-white/10 hover:scale-110"
-                      )}
-                    >
-                      {emoji}
-                      {isCustomizing && (
-                        <div className="absolute -top-1 -right-1 w-4 h-4 bg-neutral-600 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                          <X className="w-3 h-3 text-white" />
-                        </div>
-                      )}
-                    </button>
-                  ))}
-                  {isCustomizing && quickEmojis.length < 6 && (
-                    <div className="w-11 h-11 flex flex-1 items-center justify-center border border-dashed border-neutral-600 rounded-full text-neutral-500">
-                      <Plus className="w-4 h-4" />
-                    </div>
-                  )}
+              <div className="flex items-center space-x-3 text-red-400">
+                <div className="p-2.5 bg-red-500/10 rounded-full border border-red-500/20">
+                  <Trash2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Clear All Storage</h3>
+                  <p className="text-xs text-neutral-400">Free up space immediately</p>
                 </div>
               </div>
-              <div className="p-0 overflow-hidden flex-1 bg-neutral-900">
-                <EmojiPicker 
-                  theme={Theme.DARK} 
-                  onEmojiClick={(emojiData) => {
-                    // We dispatch a custom event to get the latest state since this callback is cached by EmojiPicker
-                    const evt = new CustomEvent('emoji_picker_click', { detail: emojiData.emoji });
-                    window.dispatchEvent(evt);
+              <div className="bg-neutral-950 p-3 rounded-xl border border-white/5 space-y-1">
+                <div className="text-xs text-neutral-400 flex justify-between">
+                  <span>Current Space Used:</span>
+                  <span className="text-white font-medium">{formatStorageDisplay(storageUsage?.usageBytes || 0, storageUsage?.limitBytes)}</span>
+                </div>
+              </div>
+              <p className="text-sm text-neutral-300 leading-relaxed">
+                Are you sure you want to clear storage? This will permanently delete all uploaded files, media attachments, public posts, and messages.
+              </p>
+              <div className="flex justify-end space-x-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowClearStorageModal(false)}
+                  className="px-4 py-2 text-sm text-neutral-300 hover:text-white bg-white/10 hover:bg-white/20 rounded-xl font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setShowClearStorageModal(false);
+                    try {
+                      setStorageUsage({ usageBytes: 0, limitBytes: 25 * 1024 * 1024 * 1024, categories: { images: 0, videos: 0, audio: 0, documents: 0, others: 0 } });
+                      setPosts([]);
+                      setChats([]);
+                      setMessages([]);
+                      setActiveChat(null);
+                      await fetchApi('/api/storage/clear', { method: 'POST' });
+                      setToastMessage('Storage cleared successfully!');
+                      setTimeout(() => setToastMessage(null), 3000);
+                    } catch (err) {
+                      console.error('Failed to clear storage:', err);
+                      setToastMessage('Failed to clear storage');
+                      setTimeout(() => setToastMessage(null), 3000);
+                    }
                   }}
-                  width="100%"
-                  height="400px"
-                  searchDisabled={false}
-                  skinTonesDisabled={true}
-                  previewConfig={{ showPreview: false }}
-                />
+                  className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded-xl font-medium transition-colors shadow-lg shadow-red-600/20 flex items-center space-x-1.5"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Clear Storage</span>
+                </button>
               </div>
             </motion.div>
           </motion.div>
@@ -1526,6 +2180,27 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           </motion.div>
         )}
       </AnimatePresence>
+
+      <ReactedUsersModal
+        isOpen={!!activeReactedUsersItem}
+        onClose={() => setActiveReactedUsersItem(null)}
+        reactions={
+          activeReactedUsersItem
+            ? (activeReactedUsersItem.isPost
+                ? posts.find(p => p.id === activeReactedUsersItem.id)?.reactions
+                : messages.find(m => m.id === activeReactedUsersItem.id)?.reactions) || []
+            : []
+        }
+        currentUsername={session.username}
+        onRemoveReaction={(emoji) => {
+          if (!activeReactedUsersItem) return;
+          if (activeReactedUsersItem.isPost) {
+            togglePostReaction(activeReactedUsersItem.id, emoji);
+          } else {
+            toggleMessageReaction(activeReactedUsersItem.id, emoji);
+          }
+        }}
+      />
     </div>
     </>
   );

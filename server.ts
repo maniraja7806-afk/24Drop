@@ -25,7 +25,8 @@ async function startServer() {
   });
 
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '5gb' }));
+  app.use(express.urlencoded({ limit: '5gb', extended: true }));
 
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
@@ -34,6 +35,7 @@ async function startServer() {
   // Set up Database
   const dbPath = path.join(process.cwd(), 'database.db');
   const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
@@ -55,10 +57,21 @@ async function startServer() {
       fileUrl TEXT,
       fileName TEXT,
       fileType TEXT,
+      isPinned BOOLEAN DEFAULT 0,
+      isEdited BOOLEAN DEFAULT 0,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       expiresAt DATETIME NOT NULL,
       FOREIGN KEY(sessionId) REFERENCES sessions(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS pinned_posts (
+      id TEXT PRIMARY KEY,
+      postId TEXT NOT NULL,
+      pinnedByUserId TEXT NOT NULL,
+      pinnedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(postId) REFERENCES posts(id) ON DELETE CASCADE,
+      UNIQUE(postId, pinnedByUserId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pinned_posts_postId ON pinned_posts(postId);
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
       senderId TEXT NOT NULL,
@@ -77,6 +90,15 @@ async function startServer() {
       expiresAt DATETIME NOT NULL,
       FOREIGN KEY(senderId) REFERENCES sessions(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS pinned_messages (
+      id TEXT PRIMARY KEY,
+      messageId TEXT NOT NULL,
+      pinnedByUserId TEXT NOT NULL,
+      pinnedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE,
+      UNIQUE(messageId, pinnedByUserId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pinned_messages_messageId ON pinned_messages(messageId);
     CREATE TABLE IF NOT EXISTS message_reactions (
       id TEXT PRIMARY KEY,
       messageId TEXT NOT NULL,
@@ -85,6 +107,15 @@ async function startServer() {
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       expiresAt DATETIME NOT NULL,
       FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS post_reactions (
+      id TEXT PRIMARY KEY,
+      postId TEXT NOT NULL,
+      username TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expiresAt DATETIME NOT NULL,
+      FOREIGN KEY(postId) REFERENCES posts(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -109,6 +140,18 @@ async function startServer() {
   }
 
   try {
+    db.prepare('ALTER TABLE posts ADD COLUMN isPinned BOOLEAN DEFAULT 0').run();
+  } catch (e) {
+    // Column might already exist
+  }
+
+  try {
+    db.prepare('ALTER TABLE posts ADD COLUMN isEdited BOOLEAN DEFAULT 0').run();
+  } catch (e) {
+    // Column might already exist
+  }
+
+  try {
     db.exec("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'sent'");
   } catch(e) {}
   
@@ -118,6 +161,14 @@ async function startServer() {
 
   try {
     db.exec("ALTER TABLE messages ADD COLUMN isEdited BOOLEAN DEFAULT 0");
+  } catch(e) {}
+
+  try {
+    db.exec("ALTER TABLE posts ADD COLUMN fileSize INTEGER");
+  } catch(e) {}
+
+  try {
+    db.exec("ALTER TABLE messages ADD COLUMN fileSize INTEGER");
   } catch(e) {}
 
   // Ensure uploads directory exists
@@ -134,7 +185,7 @@ async function startServer() {
   });
   const upload = multer({ 
     storage,
-    limits: { fileSize: 30 * 1024 * 1024 } // 30MB limit
+    limits: { fileSize: 5 * 1024 * 1024 * 1024 } // 5GB limit
   });
 
   // --- API Routes ---
@@ -221,27 +272,101 @@ async function startServer() {
     res.json(req.session);
   });
   
+  // Storage usage calculation logic
+  function getFileCategoryFromExtOrType(fileName: string | null, fileType: string | null): 'images' | 'videos' | 'audio' | 'documents' | 'others' {
+    const ext = fileName ? path.extname(fileName).toLowerCase() : '';
+    const type = fileType ? fileType.toLowerCase() : '';
+
+    if (type.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico', '.tiff', '.avif'].includes(ext)) {
+      return 'images';
+    }
+    if (type.startsWith('video/') || ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.m4v'].includes(ext)) {
+      return 'videos';
+    }
+    if (type.startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'].includes(ext)) {
+      return 'audio';
+    }
+    if (type.includes('pdf') || type.includes('document') || type.includes('text') || type.includes('sheet') || type.includes('zip') ||
+        ['.pdf', '.doc', '.docx', '.txt', '.rtf', '.xls', '.xlsx', '.ppt', '.pptx', '.zip', '.rar', '.7z', '.tar', '.gz', '.json', '.csv', '.md', '.html', '.js', '.ts', '.py'].includes(ext)) {
+      return 'documents';
+    }
+    return 'others';
+  }
+
+  function calculateStorageUsage() {
+    const limitBytes = 25 * 1024 * 1024 * 1024; // 25GB
+    let usageBytes = 0;
+    const categories = {
+      images: 0,
+      videos: 0,
+      audio: 0,
+      documents: 0,
+      others: 0
+    };
+
+    const uploadDir = path.join(process.cwd(), 'uploads');
+    const diskFiles = new Set<string>();
+
+    if (fs.existsSync(uploadDir)) {
+      try {
+        const files = fs.readdirSync(uploadDir);
+        for (const file of files) {
+          diskFiles.add(file);
+          try {
+            const filePath = path.join(uploadDir, file);
+            const stat = fs.statSync(filePath);
+            if (stat.isFile()) {
+              const size = stat.size;
+              usageBytes += size;
+              const cat = getFileCategoryFromExtOrType(file, null);
+              categories[cat] += size;
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
+    }
+
+    // Check DB for any remote / external / Cloudinary files where fileSize > 0
+    try {
+      const posts = db.prepare('SELECT fileSize, fileUrl, fileName, fileType FROM posts WHERE fileSize > 0 AND fileUrl IS NOT NULL').all() as any[];
+      for (const p of posts) {
+        if (p.fileUrl && p.fileUrl.startsWith('/uploads/')) {
+          const fn = p.fileUrl.replace('/uploads/', '');
+          if (diskFiles.has(fn)) continue; // Already counted from disk
+        }
+        const size = Number(p.fileSize || 0);
+        usageBytes += size;
+        const cat = getFileCategoryFromExtOrType(p.fileName, p.fileType);
+        categories[cat] += size;
+      }
+
+      const msgs = db.prepare('SELECT fileSize, fileUrl, fileName, fileType FROM messages WHERE fileSize > 0 AND fileUrl IS NOT NULL').all() as any[];
+      for (const m of msgs) {
+        if (m.fileUrl && m.fileUrl.startsWith('/uploads/')) {
+          const fn = m.fileUrl.replace('/uploads/', '');
+          if (diskFiles.has(fn)) continue; // Already counted from disk
+        }
+        const size = Number(m.fileSize || 0);
+        usageBytes += size;
+        const cat = getFileCategoryFromExtOrType(m.fileName, m.fileType);
+        categories[cat] += size;
+      }
+    } catch (e) {}
+
+    return { usageBytes, limitBytes, categories };
+  }
+
+  function broadcastStorageUpdate() {
+    const usage = calculateStorageUsage();
+    io.emit('storage_updated', usage);
+  }
+
   // Storage usage
   app.get('/api/storage/usage', requireSession, async (req: any, res: any) => {
     try {
-      const limitBytes = 25 * 1024 * 1024 * 1024; // 25GB
-      
-      const lastClearedStr = getSetting('last_cleared_time');
-      const lastCleared = lastClearedStr ? parseInt(lastClearedStr, 10) : 0;
-      // Cloudinary cache can take 24h to update, so assume 0 if cleared recently
-      if (Date.now() - lastCleared < 24 * 60 * 60 * 1000) {
-        return res.json({ usageBytes: 0, limitBytes });
-      }
-
-      if (!process.env.CLOUDINARY_CLOUD_NAME) {
-        return res.json({ usageBytes: 0, limitBytes });
-      }
-      const usage = await cloudinary.api.usage();
-      // Cloudinary storage usage is in bytes, limits are in credits (1 credit = 1GB)
-      const usageBytes = usage.storage.usage || 0;
-      res.json({ usageBytes, limitBytes });
+      res.json(calculateStorageUsage());
     } catch (err) {
-      console.error('Failed to fetch cloudinary usage:', err);
+      console.error('Failed to calculate storage usage:', err);
       res.status(500).json({ error: 'Failed to fetch storage usage' });
     }
   });
@@ -277,6 +402,8 @@ async function startServer() {
       db.prepare('DELETE FROM message_reactions').run();
 
       setSetting('last_cleared_time', Date.now().toString());
+
+      broadcastStorageUpdate();
 
       res.json({ success: true });
     } catch (err) {
@@ -345,16 +472,109 @@ async function startServer() {
     res.json({ posts, messages });
   });
 
+  // Draft Upload Endpoint (immediate background upload)
+  app.post('/api/upload/draft', requireSession, upload.single('file'), async (req: any, res: any) => {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    let fileUrl = `/uploads/${file.filename}`;
+    let fileSize = file.size;
+
+    if (process.env.CLOUDINARY_CLOUD_NAME) {
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          });
+        });
+        fileUrl = (result as any).secure_url;
+        if ((result as any).bytes) fileSize = (result as any).bytes;
+        setTimeout(() => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }, 10000);
+      } catch (err: any) {
+        console.error('Cloudinary upload error:', err);
+        setTimeout(() => { if (fs.existsSync(file.path)) fs.unlinkSync(file.path); }, 10000);
+        return res.status(500).json({ error: `Cloudinary upload error: ${err.message || 'Unknown error'}` });
+      }
+    }
+
+    const draftFileId = uuidv4();
+    broadcastStorageUpdate();
+    res.json({
+      success: true,
+      fileUrl,
+      fileName: file.originalname,
+      fileType: file.mimetype,
+      fileSize,
+      draftFileId
+    });
+  });
+
   // Get Posts
   app.get('/api/posts', requireSession, (req: any, res: any) => {
-    const stmt = db.prepare('SELECT * FROM posts ORDER BY createdAt DESC LIMIT 100');
-    const posts = stmt.all();
+    const stmt = db.prepare(`
+      SELECT p.*, 
+        (SELECT json_group_array(json_object('id', r.id, 'username', r.username, 'emoji', r.emoji)) 
+         FROM post_reactions r WHERE r.postId = p.id) as reactionsJson
+      FROM posts p
+      ORDER BY p.createdAt ASC LIMIT 100
+    `);
+    const posts = stmt.all().map((post: any) => {
+      let reactions = [];
+      if (post.reactionsJson && post.reactionsJson !== '[{}]') {
+        try {
+          reactions = JSON.parse(post.reactionsJson);
+          if (reactions.length === 1 && !reactions[0].id) {
+            reactions = [];
+          }
+        } catch(e) {}
+      }
+      delete post.reactionsJson;
+      return { ...post, reactions };
+    });
     res.json(posts);
+  });
+
+  // React to Post
+  app.post('/api/posts/:id/react', requireSession, (req: any, res: any) => {
+    const postId = req.params.id;
+    const { emoji } = req.body;
+    const session = req.session;
+
+    if (!emoji) return res.status(400).json({ error: 'Emoji required' });
+
+    const post = db.prepare('SELECT id FROM posts WHERE id = ?').get(postId) as any;
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    const existing = db.prepare('SELECT id, emoji FROM post_reactions WHERE postId = ? AND username = ?').get(postId, session.username) as any;
+
+    if (existing) {
+      db.prepare('DELETE FROM post_reactions WHERE id = ?').run(existing.id);
+      io.emit('post_reaction', { postId, username: session.username, emoji: existing.emoji, removed: true });
+
+      if (existing.emoji === emoji) {
+        return res.json({ success: true, removed: true });
+      }
+    }
+
+    const reactionId = uuidv4();
+    db.prepare(`
+      INSERT INTO post_reactions (id, postId, username, emoji, expiresAt)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(reactionId, postId, session.username, emoji, expiresAt);
+
+    const newReaction = { id: reactionId, postId, username: session.username, emoji };
+    io.emit('post_reaction', newReaction);
+    return res.json({ success: true, reaction: newReaction });
   });
 
   // Create Post
   app.post('/api/posts', requireSession, upload.single('file'), async (req: any, res: any) => {
-    const { content, parentId } = req.body;
+    const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize } = req.body;
     const file = req.file;
     const session = req.session;
 
@@ -362,16 +582,16 @@ async function startServer() {
     const driveFileName = req.body.driveFileName;
     const driveFileType = req.body.driveFileType;
 
-    if (!content && !file && !driveFileUrl) {
+    if (!content && !file && !bodyFileUrl && !driveFileUrl) {
       return res.status(400).json({ error: 'Must provide content, file, or drive link' });
     }
 
     const postId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    let fileUrl = file ? `/uploads/${file.filename}` : (driveFileUrl || null);
+    let fileUrl = bodyFileUrl || (file ? `/uploads/${file.filename}` : (driveFileUrl || null));
     
-    if (file && process.env.CLOUDINARY_CLOUD_NAME) {
+    if (file && !bodyFileUrl && process.env.CLOUDINARY_CLOUD_NAME) {
       try {
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
@@ -388,20 +608,22 @@ async function startServer() {
       }
     }
 
-    const fileName = file ? file.originalname : (driveFileName || null);
-    const fileType = file ? file.mimetype : (driveFileType || null);
+    const fileName = bodyFileName || (file ? file.originalname : (driveFileName || null));
+    const fileType = bodyFileType || (file ? file.mimetype : (driveFileType || null));
+    const fileSize = bodyFileSize ? Number(bodyFileSize) : (file ? file.size : null);
 
     const stmt = db.prepare(`
-      INSERT INTO posts (id, sessionId, username, color, avatar, content, parentId, fileUrl, fileName, fileType, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO posts (id, sessionId, username, color, avatar, content, parentId, fileUrl, fileName, fileType, fileSize, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    stmt.run(postId, session.id, session.username, session.color, session.avatar, content || null, parentId || null, fileUrl, fileName, fileType, expiresAt);
+    stmt.run(postId, session.id, session.username, session.color, session.avatar, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, expiresAt);
 
     const newPost = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
     
     // Broadcast via socket
     io.emit('new_post', newPost);
+    broadcastStorageUpdate();
     
     res.json(newPost);
   });
@@ -426,8 +648,10 @@ async function startServer() {
 
     const delStmt = db.prepare('DELETE FROM posts WHERE id = ?');
     delStmt.run(postId);
+    db.prepare('DELETE FROM post_reactions WHERE postId = ?').run(postId);
 
     io.emit('delete_post', postId);
+    broadcastStorageUpdate();
     res.json({ success: true });
   });
 
@@ -443,9 +667,49 @@ async function startServer() {
     if (!post) return res.status(404).json({ error: 'Not found' });
     if (post.sessionId !== session.id) return res.status(403).json({ error: 'Unauthorized' });
 
-    db.prepare('UPDATE posts SET content = ? WHERE id = ?').run(content, postId);
+    db.prepare('UPDATE posts SET content = ?, isEdited = 1 WHERE id = ?').run(content, postId);
     io.emit('edit_post', { postId, content });
     res.json({ success: true, content });
+  });
+
+  // Toggle Pin Post
+  app.post('/api/posts/:id/pin', requireSession, (req: any, res: any) => {
+    const postId = req.params.id;
+    const session = req.session;
+
+    const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId) as any;
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    
+    const newPinned = post.isPinned ? 0 : 1;
+    
+    const togglePinTransaction = db.transaction(() => {
+      db.prepare('UPDATE posts SET isPinned = ? WHERE id = ?').run(newPinned, postId);
+      
+      let replacedId = null;
+      if (newPinned) {
+        db.prepare('INSERT OR IGNORE INTO pinned_posts (id, postId, pinnedByUserId) VALUES (?, ?, ?)').run(uuidv4(), postId, session.id);
+        
+        const pins = db.prepare('SELECT id, postId FROM pinned_posts ORDER BY pinnedAt ASC').all() as any[];
+        if (pins.length > 10) {
+           const oldest = pins[0];
+           db.prepare('DELETE FROM pinned_posts WHERE id = ?').run(oldest.id);
+           db.prepare('UPDATE posts SET isPinned = 0 WHERE id = ?').run(oldest.postId);
+           replacedId = oldest.postId;
+        }
+      } else {
+        db.prepare('DELETE FROM pinned_posts WHERE postId = ?').run(postId);
+      }
+      return replacedId;
+    });
+    
+    const replacedId = togglePinTransaction();
+
+    io.emit('post_pinned', { postId, isPinned: newPinned });
+    if (replacedId) {
+        io.emit('post_pinned', { postId: replacedId, isPinned: 0, replaced: true });
+    }
+
+    return res.json({ success: true, isPinned: newPinned, replacedId });
   });
 
   // Get Messages
@@ -491,7 +755,7 @@ async function startServer() {
   // Send Message
   app.post('/api/messages/:username', requireSession, upload.single('file'), async (req: any, res: any) => {
     const receiverUsername = req.params.username;
-    const { content, parentId } = req.body;
+    const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize } = req.body;
     const file = req.file;
     const session = req.session;
 
@@ -517,9 +781,9 @@ async function startServer() {
     const msgId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    let fileUrl = file ? `/uploads/${file.filename}` : (driveFileUrl || null);
+    let fileUrl = bodyFileUrl || (file ? `/uploads/${file.filename}` : (driveFileUrl || null));
     
-    if (file && process.env.CLOUDINARY_CLOUD_NAME) {
+    if (file && !bodyFileUrl && process.env.CLOUDINARY_CLOUD_NAME) {
       try {
         const result = await new Promise((resolve, reject) => {
           cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
@@ -536,15 +800,16 @@ async function startServer() {
       }
     }
 
-    const fileName = file ? file.originalname : (driveFileName || null);
-    const fileType = file ? file.mimetype : (driveFileType || null);
+    const fileName = bodyFileName || (file ? file.originalname : (driveFileName || null));
+    const fileType = bodyFileType || (file ? file.mimetype : (driveFileType || null));
+    const fileSize = bodyFileSize ? Number(bodyFileSize) : (file ? file.size : null);
 
     const stmt = db.prepare(`
-      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, parentId, fileUrl, fileName, fileType, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, parentId, fileUrl, fileName, fileType, fileSize, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    stmt.run(msgId, session.id, session.username, receiverUsername, content || null, parentId || null, fileUrl, fileName, fileType, expiresAt);
+    stmt.run(msgId, session.id, session.username, receiverUsername, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, expiresAt);
 
     const newMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
     
@@ -552,6 +817,7 @@ async function startServer() {
     io.to(receiverUsername).emit('new_message', newMsg);
     // Also echo back to sender in case they are connected from multiple clients
     io.to(session.username).emit('new_message', newMsg);
+    broadcastStorageUpdate();
     
     res.json(newMsg);
   });
@@ -569,12 +835,45 @@ async function startServer() {
     }
 
     const newPinned = msg.isPinned ? 0 : 1;
-    db.prepare('UPDATE messages SET isPinned = ? WHERE id = ?').run(newPinned, messageId);
+    
+    const togglePinTransaction = db.transaction(() => {
+      db.prepare('UPDATE messages SET isPinned = ? WHERE id = ?').run(newPinned, messageId);
+      
+      let replacedId = null;
+      if (newPinned) {
+        db.prepare('INSERT OR IGNORE INTO pinned_messages (id, messageId, pinnedByUserId) VALUES (?, ?, ?)').run(uuidv4(), messageId, session.id);
+        
+        const chatPins = db.prepare(`
+            SELECT p.id, p.messageId
+            FROM pinned_messages p
+            JOIN messages m ON p.messageId = m.id
+            WHERE (m.senderUsername = ? AND m.receiverUsername = ?)
+               OR (m.senderUsername = ? AND m.receiverUsername = ?)
+            ORDER BY p.pinnedAt ASC
+        `).all(msg.senderUsername, msg.receiverUsername, msg.receiverUsername, msg.senderUsername) as any[];
+        
+        if (chatPins.length > 10) {
+            const oldest = chatPins[0];
+            db.prepare('DELETE FROM pinned_messages WHERE id = ?').run(oldest.id);
+            db.prepare('UPDATE messages SET isPinned = 0 WHERE id = ?').run(oldest.messageId);
+            replacedId = oldest.messageId;
+        }
+      } else {
+        db.prepare('DELETE FROM pinned_messages WHERE messageId = ?').run(messageId);
+      }
+      return replacedId;
+    });
+    
+    const replacedId = togglePinTransaction();
 
     io.to(msg.senderUsername).emit('message_pinned', { messageId, isPinned: newPinned });
     io.to(msg.receiverUsername).emit('message_pinned', { messageId, isPinned: newPinned });
+    if (replacedId) {
+        io.to(msg.senderUsername).emit('message_pinned', { messageId: replacedId, isPinned: 0, replaced: true });
+        io.to(msg.receiverUsername).emit('message_pinned', { messageId: replacedId, isPinned: 0, replaced: true });
+    }
 
-    return res.json({ success: true, isPinned: newPinned });
+    return res.json({ success: true, isPinned: newPinned, replacedId });
   });
 
   // Edit Message
@@ -602,10 +901,27 @@ async function startServer() {
     const messageId = req.params.id;
     const session = req.session;
 
-    const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
+    const msg = db.prepare('SELECT senderUsername, receiverUsername, fileUrl FROM messages WHERE id = ?').get(messageId) as any;
     if (!msg) return res.status(404).json({ error: 'Message not found' });
     if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized to delete' });
+    }
+
+    if (msg.fileUrl) {
+      if (msg.fileUrl.startsWith('/uploads/')) {
+        const filename = msg.fileUrl.replace('/uploads/', '');
+        const filepath = path.join(uploadDir, filename);
+        if (fs.existsSync(filepath)) {
+          try { fs.unlinkSync(filepath); } catch (e) {}
+        }
+      } else if (msg.fileUrl.includes('cloudinary.com') && process.env.CLOUDINARY_CLOUD_NAME) {
+        try {
+          const urlParts = msg.fileUrl.split('/');
+          const filenameWithExt = urlParts[urlParts.length - 1];
+          const publicId = filenameWithExt.split('.')[0];
+          cloudinary.uploader.destroy(publicId).catch(() => {});
+        } catch (e) {}
+      }
     }
 
     db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
@@ -613,6 +929,7 @@ async function startServer() {
     
     io.to(msg.senderUsername).emit('delete_message', { messageId });
     io.to(msg.receiverUsername).emit('delete_message', { messageId });
+    broadcastStorageUpdate();
     
     return res.json({ success: true });
   });
@@ -667,6 +984,8 @@ async function startServer() {
 
   // --- Sockets ---
   io.on('connection', (socket) => {
+    socket.emit('storage_updated', calculateStorageUsage());
+
     socket.on('join', (username: string) => {
       if (username) {
         socket.join(username);
@@ -737,10 +1056,16 @@ async function startServer() {
       }
     }
 
+    // We'll let the DB clean up CASCADE, but explicitly clean pinned records to be safe:
+    db.prepare('DELETE FROM pinned_posts WHERE postId IN (SELECT id FROM posts WHERE expiresAt < ?)').run(now);
+    db.prepare('DELETE FROM pinned_messages WHERE messageId IN (SELECT id FROM messages WHERE expiresAt < ?)').run(now);
+
     db.prepare('DELETE FROM posts WHERE expiresAt < ?').run(now);
     db.prepare('DELETE FROM message_reactions WHERE expiresAt < ?').run(now);
     db.prepare('DELETE FROM messages WHERE expiresAt < ?').run(now);
     db.prepare('DELETE FROM sessions WHERE expiresAt < ?').run(now);
+
+    broadcastStorageUpdate();
   }, 60 * 1000);
 
 

@@ -19,6 +19,9 @@ export function AudioPlayer({ src }: { src: string }) {
       try {
         const res = await fetch(src);
         if (!active) return;
+        if (!res.ok) {
+          throw new Error(`Failed to load audio (${res.status})`);
+        }
         
         // Try to get file size
         const size = res.headers.get('content-length');

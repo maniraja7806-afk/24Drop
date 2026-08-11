@@ -6,13 +6,14 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
   };
 
   let response;
-try {
-  response = await fetch(endpoint, { ...options, headers });
-} catch (err) {
-  // Silent catch to prevent console error spam during server restarts or network disconnects.
-  // The error will still be thrown for the caller to handle appropriately.
-  throw err;
-}
+  try {
+    response = await fetch(endpoint, { ...options, headers });
+  } catch (err: any) {
+    if (err?.name === 'TypeError' || err?.message?.includes('fetch')) {
+      throw new Error('Unable to connect to server. Please check your network connection.');
+    }
+    throw err;
+  }
   
   const contentType = response.headers.get('content-type');
   if (contentType && contentType.includes('text/html')) {
