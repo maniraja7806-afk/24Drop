@@ -363,6 +363,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
   const [unreadCount, setUnreadCount] = useState(0);
   const prevMessagesLengthRef = useRef(0);
+  const prevPostsLengthRef = useRef(0);
+  const prevLastMsgIdRef = useRef<string | null>(null);
+  const prevLastPostIdRef = useRef<string | null>(null);
 
   // Attach user interaction listeners to know when user manually scrolls away
   useEffect(() => {
@@ -545,39 +548,78 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     };
   }, [view, activeChat, activeThread]);
 
-  // WhatsApp-like Smart Auto-scroll
+  // WhatsApp-like Smart Auto-scroll (Global Sync Fix)
   useEffect(() => {
     if (view === 'chat' || activeThread) {
       const isNewMsgAdded = messages.length > prevMessagesLengthRef.current;
       const prevLength = prevMessagesLengthRef.current;
       prevMessagesLengthRef.current = messages.length;
 
-      if (isNewMsgAdded && messages.length > 0) {
-        const lastMsg = messages[messages.length - 1];
-        const isSentByMe = lastMsg && lastMsg.senderUsername === session.username;
+      const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+      const isGenuinelyNewMessage = lastMsg && prevLastMsgIdRef.current && lastMsg.id !== prevLastMsgIdRef.current;
+      prevLastMsgIdRef.current = lastMsg ? lastMsg.id : null;
 
-        if (isSentByMe || isAtBottomRef.current) {
+      if (isNewMsgAdded && messages.length > 0) {
+        if (prevLength === 0) {
+          // Initial chat load
+          scrollToBottom(false);
+        } else if (isGenuinelyNewMessage) {
+          // Genuinely new real-time message appended -> forcefully auto-scroll everyone
           scrollToBottom(true);
+          // Fallback for image loading layout shifts
+          setTimeout(() => scrollToBottom(true), 100);
         } else {
-          setUnreadCount(prev => prev + 1);
+          // Same last message ID, meaning length increased due to historical messages prepending or similar
+          // Do not steal focus/scroll if they are reading up
+          const container = scrollContainerRef.current;
+          const isNearBottom = container ? (container.scrollHeight - container.scrollTop - container.clientHeight < 300) : true;
+          if (!isNearBottom && !isAtBottomRef.current) {
+            setUnreadCount(prev => prev + (messages.length - prevLength));
+          }
         }
       } else if (messages.length > 0 && prevLength === 0) {
         // Initial chat load
         scrollToBottom(false);
       }
+    } else if (view === 'feed') {
+      const isNewPostAdded = posts.length > prevPostsLengthRef.current;
+      const prevLength = prevPostsLengthRef.current;
+      prevPostsLengthRef.current = posts.length;
+
+      const lastPost = posts.length > 0 ? posts[posts.length - 1] : null;
+      const isGenuinelyNewPost = lastPost && prevLastPostIdRef.current && lastPost.id !== prevLastPostIdRef.current;
+      prevLastPostIdRef.current = lastPost ? lastPost.id : null;
+
+      if (isNewPostAdded && posts.length > 0) {
+        if (prevLength === 0) {
+          scrollToBottom(false);
+        } else if (isGenuinelyNewPost) {
+          scrollToBottom(true);
+          setTimeout(() => scrollToBottom(true), 100);
+        }
+      } else if (posts.length > 0 && prevLength === 0) {
+        scrollToBottom(false);
+      }
     }
-  }, [messages, view, activeThread]);
+  }, [messages, posts, view, activeThread]);
 
   useEffect(() => {
     setUnreadCount(0);
     updateIsAtBottom(true);
-    prevMessagesLengthRef.current = 0;
+    if (view === 'chat' || activeThread) {
+      prevMessagesLengthRef.current = 0;
+      prevLastMsgIdRef.current = null;
+    } else if (view === 'feed') {
+      prevPostsLengthRef.current = 0;
+      prevLastPostIdRef.current = null;
+    }
     scrollToBottom(false);
-  }, [activeChat]);
+  }, [activeChat, view, activeThread]);
 
-  const [activeReactionPickerId, setActiveReactionPickerId] = useState<string | null>(null);
+  const [activeReactionMenuId, setActiveReactionMenuId] = useState<string | null>(null);
   const [activeReactionAnimation, setActiveReactionAnimation] = useState<{ id: string; emoji: string; key: number } | null>(null);
   const msgLongPressTimerRef = useRef<any>(null);
+  const touchStartPosRef = useRef({ x: 0, y: 0 });
   const [activeReactedUsersItem, setActiveReactedUsersItem] = useState<{ id: string; reactions: any[]; isPost: boolean } | null>(null);
 
   const togglePin = async (messageId: string) => {
@@ -1279,20 +1321,24 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     expiresAt={post.expiresAt}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      setActiveReactionPickerId(activeReactionPickerId === post.id ? null : post.id);
+                      setActiveReactionMenuId(activeReactionMenuId === post.id ? null : post.id);
                     }}
                     onDoubleClick={(e) => {
                       e.preventDefault();
                       const defaultEmoji = getCustomReactions()[0] || '😀';
                       togglePostReaction(post.id, defaultEmoji);
                     }}
-                    onTouchStart={() => {
+                    onTouchStart={(e) => {
+                      if (e.touches.length > 0) {
+                        touchStartPosRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                      }
                       msgLongPressTimerRef.current = setTimeout(() => {
                         if (typeof navigator !== 'undefined' && navigator.vibrate) {
                           try { navigator.vibrate(30); } catch(e){}
                         }
-                        setActiveReactionPickerId(post.id);
-                      }, 380);
+                        setActiveReactionMenuId(post.id);
+                        msgLongPressTimerRef.current = null;
+                      }, 500);
                     }}
                     onTouchEnd={() => {
                       if (msgLongPressTimerRef.current) {
@@ -1300,10 +1346,14 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         msgLongPressTimerRef.current = null;
                       }
                     }}
-                    onTouchMove={() => {
-                      if (msgLongPressTimerRef.current) {
-                        clearTimeout(msgLongPressTimerRef.current);
-                        msgLongPressTimerRef.current = null;
+                    onTouchMove={(e) => {
+                      if (msgLongPressTimerRef.current && e.touches.length > 0) {
+                        const dx = e.touches[0].clientX - touchStartPosRef.current.x;
+                        const dy = e.touches[0].clientY - touchStartPosRef.current.y;
+                        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                          clearTimeout(msgLongPressTimerRef.current);
+                          msgLongPressTimerRef.current = null;
+                        }
                       }
                     }}
                     id={`post-${post.id}`}
@@ -1356,7 +1406,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         >
                           {post.isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                         </button>
-                        <button 
+                        {post.username === session?.username && (
+<button 
                           aria-label="Delete post"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1367,6 +1418,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
+)}
                       </div>
                     </div>
 
@@ -1452,9 +1504,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5 w-full relative">
                       {/* Floating Reaction Picker Popup */}
                       <ReactionPickerPopup
-                        isOpen={activeReactionPickerId === post.id}
+                        isOpen={activeReactionMenuId === post.id}
                         onSelectEmoji={(emoji) => togglePostReaction(post.id, emoji)}
-                        onClose={() => setActiveReactionPickerId(null)}
+                        onClose={() => setActiveReactionMenuId(null)}
                         align="left"
                         onPin={() => togglePostPin(post.id)}
                         isPinned={!!post.isPinned}
@@ -1474,7 +1526,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         )}
                         <span>Copy</span>
                       </button>
-                      <button 
+                      {post.username === session?.username && (
+<button 
                         aria-label="Edit post"
                         onClick={() => startEditing(post)}
                         className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-950/60 shadow-sm"
@@ -1483,6 +1536,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         <Edit2 className="w-3.5 h-3.5" />
                         <span>Edit</span>
                       </button>
+)}
                     </div>
                   </div>
                 </DissolvingItem>
@@ -1554,7 +1608,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     className={clsx(
                       "flex flex-col max-w-[80%] group relative transition-all duration-200",
                       isMe ? "self-end items-end" : "self-start items-start",
-                      activeReactionPickerId === msg.id && "z-50 scale-[1.03]"
+                      activeReactionMenuId === msg.id && "z-50 scale-[1.03]"
                     )}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -1598,13 +1652,17 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         className={clsx("flex items-end space-x-2 relative pt-2 touch-pan-y", isMe && "flex-row-reverse space-x-reverse")}
                       >
                         <div 
-                          onTouchStart={() => {
+                          onTouchStart={(e) => {
+                            if (e.touches.length > 0) {
+                              touchStartPosRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                            }
                             msgLongPressTimerRef.current = setTimeout(() => {
                               if (typeof navigator !== 'undefined' && navigator.vibrate) {
                                 try { navigator.vibrate(35); } catch(e){}
                               }
-                              setActiveReactionPickerId(msg.id);
-                            }, 380);
+                              setActiveReactionMenuId(msg.id);
+                              msgLongPressTimerRef.current = null;
+                            }, 500);
                           }}
                           onTouchEnd={() => {
                             if (msgLongPressTimerRef.current) {
@@ -1612,15 +1670,19 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                               msgLongPressTimerRef.current = null;
                             }
                           }}
-                          onTouchMove={() => {
-                            if (msgLongPressTimerRef.current) {
-                              clearTimeout(msgLongPressTimerRef.current);
-                              msgLongPressTimerRef.current = null;
+                          onTouchMove={(e) => {
+                            if (msgLongPressTimerRef.current && e.touches.length > 0) {
+                              const dx = e.touches[0].clientX - touchStartPosRef.current.x;
+                              const dy = e.touches[0].clientY - touchStartPosRef.current.y;
+                              if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                                clearTimeout(msgLongPressTimerRef.current);
+                                msgLongPressTimerRef.current = null;
+                              }
                             }
                           }}
                           onContextMenu={(e) => {
                             e.preventDefault();
-                            setActiveReactionPickerId(activeReactionPickerId === msg.id ? null : msg.id);
+                            setActiveReactionMenuId(activeReactionMenuId === msg.id ? null : msg.id);
                           }}
                           onDoubleClick={(e) => {
                             e.preventDefault();
@@ -1631,7 +1693,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             "px-4 py-2.5 rounded-2xl text-[15px] relative transition-all group/bubble select-none cursor-pointer", 
                             editingMessageId !== msg.id && "active:scale-[0.98]",
                             isMe ? "bg-white text-black rounded-br-sm" : "bg-neutral-800 text-white rounded-bl-sm",
-                            activeReactionPickerId === msg.id && "ring-2 ring-blue-500/80 shadow-2xl scale-[1.03]"
+                            activeReactionMenuId === msg.id && "ring-2 ring-blue-500/80 shadow-2xl scale-[1.03]"
                           )}
                         >
                           {/* Reaction Particle Burst Animation */}
@@ -1652,9 +1714,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
                           {/* Reaction Picker Popup */}
                           <ReactionPickerPopup
-                            isOpen={activeReactionPickerId === msg.id}
+                            isOpen={activeReactionMenuId === msg.id}
                             onSelectEmoji={(emoji) => toggleMessageReaction(msg.id, emoji)}
-                            onClose={() => setActiveReactionPickerId(null)}
+                            onClose={() => setActiveReactionMenuId(null)}
                             isMe={isMe}
                             isPinned={!!msg.isPinned}
                             onPin={() => togglePin(msg.id)}
@@ -1678,7 +1740,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             >
                               {msg.isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                             </button>
-                            <button
+                            {isMe && (
+<button
                               aria-label="Delete message"
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1689,6 +1752,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
+)}
                           </div>
 
                           {/* Quote preview of Parent Message if replied */}
@@ -1828,7 +1892,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         )}
                         <span>Copy</span>
                       </button>
-                      <button 
+                      {isMe && (
+<button 
                         aria-label="Edit message"
                         onClick={() => startEditing(msg)}
                         className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-900/60 shadow-sm"
@@ -1837,6 +1902,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         <Edit2 className="w-3.5 h-3.5" />
                         <span>Edit</span>
                       </button>
+)}
                     </div>
 
                     <div className="text-[10px] text-neutral-500 mt-1 flex items-center space-x-1.5">

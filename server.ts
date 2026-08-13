@@ -826,7 +826,6 @@ async function startServer() {
   app.post('/api/messages/:id/pin', requireSession, (req: any, res: any) => {
     const messageId = req.params.id;
     const session = req.session;
-
     const msg = db.prepare('SELECT senderUsername, receiverUsername, isPinned FROM messages WHERE id = ?').get(messageId) as any;
     if (!msg) return res.status(404).json({ error: 'Message not found' });
     
@@ -881,10 +880,9 @@ async function startServer() {
     const messageId = req.params.id;
     const session = req.session;
     const { content } = req.body;
-
     const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
     if (!msg) return res.status(404).json({ error: 'Message not found' });
-    if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
+    if (msg.senderUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized to edit' });
     }
 
@@ -900,10 +898,9 @@ async function startServer() {
   app.delete('/api/messages/:id', requireSession, (req: any, res: any) => {
     const messageId = req.params.id;
     const session = req.session;
-
     const msg = db.prepare('SELECT senderUsername, receiverUsername, fileUrl FROM messages WHERE id = ?').get(messageId) as any;
     if (!msg) return res.status(404).json({ error: 'Message not found' });
-    if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
+    if (msg.senderUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized to delete' });
     }
 
@@ -937,12 +934,8 @@ async function startServer() {
   // React to Message
   app.post('/api/messages/:id/react', requireSession, (req: any, res: any) => {
     const messageId = req.params.id;
-    const { emoji } = req.body;
     const session = req.session;
-
-    if (!emoji) return res.status(400).json({ error: 'Emoji required' });
-
-    // Check if message exists
+    const { emoji } = req.body;
     const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
     if (!msg) return res.status(404).json({ error: 'Message not found' });
     

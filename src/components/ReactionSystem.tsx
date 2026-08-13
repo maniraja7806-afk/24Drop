@@ -251,7 +251,13 @@ export const ReactionPickerPopup: React.FC<ReactionPickerProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    const handleClickOutside = (e: MouseEvent) => {
+    let isReady = false;
+    const readyTimer = setTimeout(() => {
+      isReady = true;
+    }, 150);
+
+    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
+      if (!isReady) return;
       const target = e.target as Node;
       if (popupRef.current && popupRef.current.contains(target)) return;
       if ((target as HTMLElement)?.closest?.('.epr-main, .epr-search-container, .EmojiPickerReact, .emoji-picker-react')) return;
@@ -262,10 +268,11 @@ export const ReactionPickerPopup: React.FC<ReactionPickerProps> = ({
       if (e.key === 'Escape') onClose();
     };
 
-    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('pointerdown', handleClickOutside as EventListener);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
+      clearTimeout(readyTimer);
+      document.removeEventListener('pointerdown', handleClickOutside as EventListener);
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [isOpen, onClose]);
@@ -308,6 +315,19 @@ export const ReactionPickerPopup: React.FC<ReactionPickerProps> = ({
       setErrorMsg(null);
     }
   };
+
+  // Force blur the search input in the Emoji Picker to prevent mobile keyboard from opening
+  useEffect(() => {
+    if (isOpen && (mode === 'picker' || mode === 'customize')) {
+      const timer = setTimeout(() => {
+        if (popupRef.current) {
+          const searchInputs = popupRef.current.querySelectorAll('input');
+          searchInputs.forEach(input => input.blur());
+        }
+      }, 50); // Short delay to ensure it renders
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen, mode]);
 
   const handleSaveCustomize = () => {
     saveCustomReactions(editEmojis);
@@ -532,6 +552,7 @@ export const ReactionPickerPopup: React.FC<ReactionPickerProps> = ({
                     <div className="flex-1 w-full min-h-0 flex flex-col" >
             <EmojiPicker
               theme={Theme.DARK}
+              autoFocusSearch={false}
               previewConfig={{ showPreview: false }}
               onEmojiClick={(e) => handlePick(e.emoji)}
               width="100%"
@@ -609,6 +630,7 @@ export const ReactionPickerPopup: React.FC<ReactionPickerProps> = ({
                     <div className="flex-1 w-full min-h-0 flex flex-col" >
             <EmojiPicker
               theme={Theme.DARK}
+              autoFocusSearch={false}
               previewConfig={{ showPreview: false }}
               onEmojiClick={(e) => handleAddEdit(e.emoji)}
               width="100%"
