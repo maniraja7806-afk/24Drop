@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, memo } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, memo } from 'react';
 import { 
   Send, Plus, Mic, AudioLines, Loader2, Camera, Upload, X, 
   RefreshCw, FileText, FileArchive, FileCode, Video, Music, 
@@ -64,6 +64,9 @@ export const Composer = memo(({
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
   
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [messageSent, setMessageSent] = useState(false);
 
   const storageKey = `documind_draft_att_${view}_${activeChat || 'global'}`;
   const textStorageKey = `documind_draft_text_${view}_${activeChat || 'global'}`;
@@ -297,6 +300,18 @@ export const Composer = memo(({
     }
   };
 
+  useLayoutEffect(() => {
+    if (messageSent) {
+      const timer = setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+        }
+        setMessageSent(false);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [messageSent]);
+
   const handleSend = async () => {
     const uploadingCount = attachments.filter(a => a.status === 'uploading').length;
     if (uploadingCount > 0) {
@@ -386,10 +401,10 @@ export const Composer = memo(({
       if (setReplyToMessage) setReplyToMessage(null);
       localStorage.removeItem(textStorageKey);
       localStorage.removeItem(storageKey);
-
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
+      setMessageSent(true);
 
       if (view === 'chat' && activeChat && isTyping) {
         setIsTyping(false);
@@ -663,34 +678,23 @@ export const Composer = memo(({
                       <span>Google Drive</span>
                     </button>
 
-                    <label className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 cursor-pointer transition-colors">
-                      <Upload className="w-4 h-4 text-neutral-400" />
-                      <span>Upload Files</span>
-                      <input 
-                        type="file" 
-                        multiple 
-                        className="hidden" 
-                        onChange={(e) => { 
-                          if (e.target.files) handleAddFiles(e.target.files);
-                          setIsMenuOpen(false); 
-                        }} 
-                      />
-                    </label>
+                    <button 
+    type="button" 
+    onClick={() => { setIsMenuOpen(false); setTimeout(() => fileInputRef.current?.click(), 0); }}
+    className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors"
+  >
+    <Upload className="w-4 h-4 text-neutral-400" />
+    <span>Upload Files</span>
+  </button>
 
-                    <label className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 cursor-pointer transition-colors">
-                      <FolderUp className="w-4 h-4 text-neutral-400" />
-                      <span>Upload Folder</span>
-                      <input 
-                        type="file" 
-                        multiple 
-                        {...({ webkitdirectory: "", directory: "" } as any)} 
-                        className="hidden" 
-                        onChange={(e) => { 
-                          if (e.target.files) handleAddFiles(e.target.files);
-                          setIsMenuOpen(false); 
-                        }} 
-                      />
-                    </label>
+                    <button 
+    type="button" 
+    onClick={() => { setIsMenuOpen(false); setTimeout(() => folderInputRef.current?.click(), 0); }}
+    className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors"
+  >
+    <FolderUp className="w-4 h-4 text-neutral-400" />
+    <span>Upload Folder</span>
+  </button>
 
                     <button 
                       type="button" 
@@ -756,6 +760,27 @@ export const Composer = memo(({
           )}
         </button>
       </form>
+      <input 
+        type="file" 
+        multiple 
+        ref={fileInputRef}
+        className="hidden" 
+        onChange={(e) => { 
+          if (e.target.files) handleAddFiles(e.target.files);
+          if (e.target) e.target.value = '';
+        }} 
+      />
+      <input 
+        type="file" 
+        multiple 
+        ref={folderInputRef}
+        {...({ webkitdirectory: "", directory: "" } as any)} 
+        className="hidden" 
+        onChange={(e) => { 
+          if (e.target.files) handleAddFiles(e.target.files);
+          if (e.target) e.target.value = '';
+        }} 
+      />
     </div>
   );
 });
