@@ -34,7 +34,7 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           onClick={onPreview} 
         />
         <div className="p-2 bg-neutral-900/90 backdrop-blur border-t border-white/10 flex items-center justify-between text-xs text-neutral-300">
-          <span className="truncate font-medium max-w-[200px]" title={name}>{name}</span>
+          <span className="truncate font-medium max-w-full flex-1 min-w-0" title={name}>{name}</span>
           <div className="flex items-center space-x-2 flex-shrink-0">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
             <a 

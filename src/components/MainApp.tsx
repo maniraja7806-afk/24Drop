@@ -1424,7 +1424,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
                     {/* Original post text remains visible */}
                     {post.content && (
-                      <p className="text-neutral-200 text-[15px] leading-relaxed mb-2 whitespace-pre-wrap break-words">
+                      <p className="text-neutral-200 text-[15px] leading-relaxed mb-2 whitespace-pre-wrap break-words [word-break:break-word]">
                         {post.content}
                         {post.isEdited === 1 && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
                         {!!post.isPinned && <span className="text-[10px] ml-2 inline-flex items-center text-blue-400"><Pin className="w-2.5 h-2.5 mr-0.5" fill="currentColor" /></span>}
@@ -1784,7 +1784,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
                           {/* Original message content remains visible */}
                           {msg.content && (
-                            <div className="whitespace-pre-wrap break-words">
+                            <div className="whitespace-pre-wrap break-words [word-break:break-word]">
                               {highlightText(msg.content, chatSearchQuery)}
                               {msg.isEdited === 1 && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
                             </div>

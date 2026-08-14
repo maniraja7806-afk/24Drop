@@ -199,11 +199,14 @@ export const Composer = memo(({
     const fileArray = Array.from(files);
     if (fileArray.length === 0) return;
 
-    const validFiles = fileArray.filter(f => f.size <= 5 * 1024 * 1024 * 1024); // 5GB limit
-    if (validFiles.length < fileArray.length) {
-      setToastMessage("Some files were skipped because they exceed 5GB limit.");
-      setTimeout(() => setToastMessage(null), 3000);
+    const hasOversized = fileArray.some(f => f.size > 5 * 1024 * 1024 * 1024); // 5GB limit
+    if (hasOversized) {
+      setToastMessage("Cannot attach files: One or more files exceed the 5 GB limit.");
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
     }
+
+    const validFiles = fileArray;
 
     const newDraftItems: DraftAttachment[] = validFiles.map(f => {
       const id = Math.random().toString(36).substring(2) + Date.now();
