@@ -80,3 +80,11 @@ html, body, #root {
   overflow: hidden;
   background-color: #0a0a0a;
 }
+
+/* Firefox Android Composer Fix */
+.chat-composer-container {
+  flex-shrink: 0 !important;
+  min-height: 72px; /* Ensure basic height */
+  max-width: 100%;
+  width: 100%;
+}

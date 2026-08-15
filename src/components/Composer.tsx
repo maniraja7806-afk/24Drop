@@ -476,7 +476,7 @@ export const Composer = memo(({
   return (
     <div 
       className={clsx(
-        "flex flex-col transition-all rounded-2xl p-1",
+        "flex flex-col w-full min-w-0 transition-all rounded-2xl p-1",
         isDragOver && "border-2 border-dashed border-blue-500 bg-blue-500/10"
       )}
       onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
@@ -660,8 +660,8 @@ export const Composer = memo(({
       )}
 
       {/* Main Composer Input Form */}
-      <form onSubmit={(e) => { e.preventDefault(); handleSend(); }} className="flex items-end space-x-3">
-        <div className="flex-1 flex items-end bg-[#212121] rounded-[24px] px-1.5 py-1.5 shadow-2xl relative border border-white/5">
+      <form onSubmit={(e) => { e.preventDefault(); handleSend(); }} className="flex items-end space-x-2 md:space-x-3 w-full min-w-0 flex-shrink-0">
+        <div className="flex-1 flex items-end bg-[#212121] rounded-[24px] px-1.5 py-1.5 shadow-2xl relative border border-white/5 min-w-0">
           
           <div className="flex items-center pl-1 pr-2 pb-1.5 flex-shrink-0 self-end">
             <div className="relative">
@@ -716,7 +716,7 @@ export const Composer = memo(({
                 aria-label="Add files"
                 onClick={() => setIsMenuOpen(!isMenuOpen)}
                 className={clsx(
-                  "w-10 h-10 md:w-8 md:h-8 flex items-center justify-center rounded-full text-neutral-400 hover:text-white hover:bg-white/10 transition-colors",
+                  "w-11 h-11 min-w-[44px] min-h-[44px] flex-shrink-0 flex items-center justify-center rounded-full text-neutral-400 hover:text-white hover:bg-white/10 transition-colors",
                   isMenuOpen && "bg-white/10 text-white"
                 )}
               >
@@ -732,7 +732,7 @@ export const Composer = memo(({
             value={composerText}
             onChange={handleComposerChange}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-            className="flex-1 min-w-0 bg-transparent border-none focus:ring-0 text-sm sm:text-[15px] px-1.5 py-2.5 placeholder-neutral-400 outline-none text-white resize-none min-h-[40px] max-h-32 self-center leading-normal placeholder:truncate placeholder:select-none"
+            className="flex-1 w-full min-w-0 bg-transparent border-none focus:ring-0 text-base sm:text-[15px] px-1.5 py-2.5 placeholder-neutral-400 outline-none text-white resize-none min-h-[40px] max-h-32 self-center leading-normal placeholder:truncate placeholder:select-none"
             disabled={isSending}
           />
 
@@ -741,7 +741,7 @@ export const Composer = memo(({
               type="button"
               aria-label="Microphone"
               onClick={handleMicClick}
-              className="p-2 md:p-1.5 transition-colors cursor-pointer rounded-full overflow-hidden flex items-center justify-center text-neutral-400 hover:text-white"
+              className="w-11 h-11 min-w-[44px] min-h-[44px] flex-shrink-0 transition-colors cursor-pointer rounded-full overflow-hidden flex items-center justify-center text-neutral-400 hover:text-white"
             >
               <Mic className="w-5 h-5" />
             </button>
@@ -752,7 +752,7 @@ export const Composer = memo(({
           type="submit"
           aria-label="Send"
           disabled={isSending || (!composerText.trim() && attachments.length === 0 && !driveFile)}
-          className="w-12 h-12 bg-white text-black hover:bg-neutral-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-colors flex-shrink-0 flex items-center justify-center shadow-lg"
+          className="w-12 h-12 min-w-[48px] min-h-[48px] bg-white text-black hover:bg-neutral-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-full transition-colors flex-shrink-0 flex items-center justify-center shadow-lg"
         >
           {isSending ? (
             <Loader2 className="w-5 h-5 animate-spin" />

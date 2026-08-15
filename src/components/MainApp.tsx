@@ -1113,7 +1113,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
 
       {/* Main Content Area */}
       <div className={clsx(
-        "flex-1 flex-col relative h-full overflow-hidden w-full md:w-auto",
+        "flex-1 flex-col relative h-full overflow-hidden w-full md:w-auto min-w-0",
         !mobileShowSidebar ? 'flex' : 'hidden md:flex'
       )}>
         {/* Header */}
@@ -1977,8 +1977,8 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         </div>
         {/* Composer Footer */}
         {view !== 'global_search' && (
-        <div data-composer="true" id="chat-composer" className="w-full flex-shrink-0 p-2 md:p-4 pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:pb-4 bg-neutral-950 border-t border-white/10 shadow-[0_-4px_20px_rgba(0,0,0,0.5)] z-20">
-          <div className="max-w-3xl mx-auto relative">
+        <div data-composer="true" id="chat-composer" className="chat-composer-container w-full flex-shrink-0 p-2 md:p-4 pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:pb-4 bg-neutral-950 border-t border-white/10 shadow-[0_-4px_20px_rgba(0,0,0,0.5)] z-20 min-w-0">
+          <div className="max-w-3xl mx-auto relative w-full min-w-0">
             <AnimatePresence>
               {audioDraft && (
                   <motion.div
