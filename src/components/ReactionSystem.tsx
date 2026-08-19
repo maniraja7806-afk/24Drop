@@ -67,6 +67,7 @@ export const ReactionPickerPopup: React.FC<ReactionPickerProps> = ({
     left: number;
     positionStyle: 'above' | 'below' | 'center';
     isMobileSheet?: boolean;
+    maxHeight?: number;
   }>({
     top: -9999,
     left: -9999,

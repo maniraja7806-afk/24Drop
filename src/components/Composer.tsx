@@ -199,14 +199,14 @@ export const Composer = memo(({
     const fileArray = Array.from(files);
     if (fileArray.length === 0) return;
 
-    const hasOversized = fileArray.some(f => f.size > 5 * 1024 * 1024 * 1024); // 5GB limit
-    if (hasOversized) {
-      setToastMessage("Cannot attach files: One or more files exceed the 5 GB limit.");
+    const oversizedFiles = fileArray.filter(f => f.size > 5 * 1024 * 1024 * 1024); // 5GB limit
+    if (oversizedFiles.length > 0) {
+      setToastMessage("File is too large. Maximum file size is 5 GB.");
       setTimeout(() => setToastMessage(null), 4000);
-      return;
     }
 
-    const validFiles = fileArray;
+    const validFiles = fileArray.filter(f => f.size <= 5 * 1024 * 1024 * 1024);
+    if (validFiles.length === 0) return;
 
     const newDraftItems: DraftAttachment[] = validFiles.map(f => {
       const id = Math.random().toString(36).substring(2) + Date.now();
@@ -214,7 +214,7 @@ export const Composer = memo(({
       const previewUrl = isMedia ? URL.createObjectURL(f) : null;
       return {
         id,
-        name: f.name,
+        name: f.webkitRelativePath || f.name,
         size: f.size,
         type: f.type || 'application/octet-stream',
         previewUrl,
@@ -337,23 +337,58 @@ export const Composer = memo(({
     
     try {
       const sendRequest = async (payload: any) => {
+        let res;
         if (view === 'feed') {
-          await fetchApi('/api/posts', {
+          res = await fetchApi('/api/posts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
         } else if (view === 'chat' && activeChat) {
-          await fetchApi(`/api/messages/${activeChat}`, {
+          res = await fetchApi(`/api/messages/${activeChat}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
         }
+        if (res?._queued) {
+          setToastMessage('Message queued (offline). Will send when reconnected.');
+        }
+        return res;
       };
 
+      // Check if this is a folder upload (at least one file has a '/' in its relative path)
+      const isFolder = attachments.some(a => a.name.includes('/'));
+
+      if (isFolder) {
+        const firstFolderFile = attachments.find(a => a.name.includes('/'));
+        const folderName = firstFolderFile ? firstFolderFile.name.split('/')[0] : 'Folder';
+        
+        const folderFiles = attachments.map(a => ({
+          name: a.name, // relative path
+          fileUrl: a.fileUrl,
+          type: a.type,
+          size: a.size
+        }));
+
+        await sendRequest({
+          content: composerText.trim() || undefined,
+          parentId: effectiveParentId,
+          folderName: folderName || 'Unnamed Folder',
+          folderFiles: JSON.stringify(folderFiles),
+        });
+
+        if (driveFile) {
+          await sendRequest({
+            parentId: effectiveParentId,
+            driveFileUrl: driveFile.url,
+            driveFileName: driveFile.name,
+            driveFileType: driveFile.type
+          });
+        }
+      }
       // 1 attachment and no drive file -> send together in 1 payload
-      if (attachments.length === 1 && !driveFile) {
+      else if (attachments.length === 1 && !driveFile) {
         const att = attachments[0];
         await sendRequest({
           content: composerText.trim() || undefined,
@@ -481,10 +516,47 @@ export const Composer = memo(({
       )}
       onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
       onDragLeave={() => setIsDragOver(false)}
-      onDrop={(e) => {
+            onDrop={async (e) => {
         e.preventDefault();
         setIsDragOver(false);
-        if (e.dataTransfer.files) handleAddFiles(e.dataTransfer.files);
+        if (!e.dataTransfer.items) {
+          if (e.dataTransfer.files) handleAddFiles(e.dataTransfer.files);
+          return;
+        }
+
+        const items = Array.from(e.dataTransfer.items).filter(item => item.kind === 'file');
+        const files: File[] = [];
+
+        const readEntry = async (entry: any, path = '') => {
+          if (entry.isFile) {
+            const file = await new Promise<File>((resolve) => entry.file(resolve));
+            // Polyfill webkitRelativePath for dropped files
+            Object.defineProperty(file, 'webkitRelativePath', {
+              value: path + file.name,
+              writable: false
+            });
+            files.push(file);
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const entries = await new Promise<any[]>((resolve) => {
+              reader.readEntries(resolve);
+            });
+            for (const child of entries) {
+              await readEntry(child, path + entry.name + '/');
+            }
+          }
+        };
+
+        for (const item of items) {
+          const entry = item.webkitGetAsEntry();
+          if (entry) {
+            await readEntry(entry);
+          }
+        }
+
+        if (files.length > 0) {
+          handleAddFiles(files);
+        }
       }}
     >
       {/* Reply Preview Banner */}
@@ -543,7 +615,81 @@ export const Composer = memo(({
       {/* Draft Attachments List */}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2.5 mb-2.5 ml-2 max-h-52 overflow-y-auto pr-2 custom-scrollbar">
-          {attachments.map(att => (
+          {(() => {
+            const isFolder = attachments.some(a => a.name.includes('/'));
+            if (isFolder) {
+              const totalSize = attachments.reduce((sum, a) => sum + a.size, 0);
+              const totalProgress = attachments.reduce((sum, a) => sum + a.progress, 0) / attachments.length;
+              const anyFailed = attachments.some(a => a.status === 'failed' || a.status === 'cancelled');
+              const allSuccess = attachments.every(a => a.status === 'success');
+              const status = anyFailed ? 'failed' : allSuccess ? 'success' : 'uploading';
+              const firstFolderFile = attachments.find(a => a.name.includes('/'));
+              const folderName = firstFolderFile ? firstFolderFile.name.split('/')[0] : 'Folder';
+
+              return (
+                <div className={clsx(
+                  "relative group flex items-center space-x-3 p-3 rounded-xl border shadow-lg bg-[#212121] transition-all w-full max-w-[320px]",
+                  status === 'uploading' && "border-blue-500/50 bg-blue-950/20",
+                  status === 'success' && "border-emerald-500/40 bg-emerald-950/10",
+                  status === 'failed' && "border-red-500/50 bg-red-950/20"
+                )}>
+                  <div className="p-2.5 bg-indigo-500/10 rounded-lg border border-indigo-500/20">
+                    <FolderUp className="w-6 h-6 text-indigo-400 flex-shrink-0" />
+                  </div>
+                  <div className="flex-1 min-w-0 pr-6">
+                    <input 
+                      type="text"
+                      value={folderName}
+                      placeholder="Folder Name"
+                      onChange={(e) => {
+                        const newName = e.target.value.replace(/\//g, '');
+                        setAttachments(prev => prev.map(a => {
+                          const parts = a.name.split('/');
+                          if (parts.length > 1) {
+                            parts[0] = newName;
+                            return { ...a, name: parts.join('/') };
+                          }
+                          return a;
+                        }));
+                      }}
+                      className="text-[13px] font-semibold text-white bg-transparent outline-none w-full truncate border-b border-transparent focus:border-blue-500 focus:bg-black/30 px-1 py-0.5 -ml-1 rounded transition-all"
+                      title="Click to rename folder"
+                      disabled={isSending}
+                    />
+                    <div className="flex items-center space-x-2 text-[11px] text-neutral-400 mt-1">
+                      <span>{attachments.length} files</span>
+                      <span>•</span>
+                      <span>{formatBytes(totalSize)}</span>
+                    </div>
+                    {status === 'uploading' && (
+                      <div className="w-full bg-white/10 h-1 rounded-full mt-2 overflow-hidden">
+                        <div 
+                          className="bg-blue-500 h-full rounded-full transition-all duration-200"
+                          style={{ width: `${totalProgress}%` }}
+                        />
+                      </div>
+                    )}
+                    {status === 'failed' && (
+                      <div className="text-red-400 text-xs mt-1 font-medium">Some files failed to upload</div>
+                    )}
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      attachments.forEach(att => {
+                        if (att.status === 'uploading' && att.xhr) att.xhr.abort();
+                      });
+                      setAttachments([]);
+                    }}
+                    className="absolute -top-2 -right-2 w-6 h-6 bg-neutral-800 text-white rounded-full flex items-center justify-center border border-white/10 hover:bg-red-500 transition-colors shadow-lg z-10"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              );
+            }
+
+            return attachments.map(att => (
             <div 
               key={att.id} 
               className={clsx(
@@ -655,7 +801,8 @@ export const Composer = memo(({
                 </button>
               </div>
             </div>
-          ))}
+          ));
+          })()}
         </div>
       )}
 
@@ -683,7 +830,7 @@ export const Composer = memo(({
 
                     <button 
     type="button" 
-    onClick={() => { setIsMenuOpen(false); setTimeout(() => fileInputRef.current?.click(), 0); }}
+    onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); setIsMenuOpen(false); }}
     className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors"
   >
     <Upload className="w-4 h-4 text-neutral-400" />
@@ -692,7 +839,16 @@ export const Composer = memo(({
 
                     <button 
     type="button" 
-    onClick={() => { setIsMenuOpen(false); setTimeout(() => folderInputRef.current?.click(), 0); }}
+    onClick={(e) => { 
+      e.preventDefault();
+      const isFolderUploadSupported = 'webkitdirectory' in document.createElement('input');
+      if (isFolderUploadSupported) {
+        folderInputRef.current?.click();
+      } else {
+        setToastMessage('Folder selection is not supported in this browser. Please select multiple files instead.');
+      }
+      setIsMenuOpen(false); 
+    }}
     className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors"
   >
     <FolderUp className="w-4 h-4 text-neutral-400" />
@@ -701,7 +857,7 @@ export const Composer = memo(({
 
                     <button 
                       type="button" 
-                      onClick={() => { setIsMenuOpen(false); openCustomCamera(); }} 
+                      onClick={(e) => { e.preventDefault(); setIsMenuOpen(false); openCustomCamera(); }} 
                       className="w-full px-4 py-2.5 hover:bg-white/5 flex items-center space-x-3 text-[15px] text-neutral-200 transition-colors"
                     >
                       <Camera className="w-4 h-4 text-neutral-400" />
@@ -732,7 +888,7 @@ export const Composer = memo(({
             value={composerText}
             onChange={handleComposerChange}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-            className="flex-1 w-full min-w-0 bg-transparent border-none focus:ring-0 text-base sm:text-[15px] px-1.5 py-2.5 placeholder-neutral-400 outline-none text-white resize-none min-h-[40px] max-h-32 self-center leading-normal placeholder:truncate placeholder:select-none"
+            className="flex-1 min-w-0 bg-transparent border-none focus:ring-0 text-base sm:text-[15px] px-1.5 py-2.5 placeholder-neutral-400 outline-none text-white resize-none min-h-[40px] max-h-32 self-center leading-normal placeholder:truncate placeholder:select-none"
             disabled={isSending}
           />
 
@@ -767,7 +923,7 @@ export const Composer = memo(({
         type="file" 
         multiple 
         ref={fileInputRef}
-        className="hidden" 
+        className="w-0 h-0 absolute opacity-0 pointer-events-none" 
         onChange={(e) => { 
           if (e.target.files) handleAddFiles(e.target.files);
           if (e.target) e.target.value = '';
@@ -778,7 +934,7 @@ export const Composer = memo(({
         multiple 
         ref={folderInputRef}
         {...({ webkitdirectory: "", directory: "" } as any)} 
-        className="hidden" 
+        className="w-0 h-0 absolute opacity-0 pointer-events-none" 
         onChange={(e) => { 
           if (e.target.files) handleAddFiles(e.target.files);
           if (e.target) e.target.value = '';

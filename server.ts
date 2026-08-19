@@ -9,6 +9,10 @@ import multer from 'multer';
 import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import { v2 as cloudinary } from 'cloudinary';
+// @ts-ignore
+import archiver from 'archiver';
+import https from 'https';
+import http from 'http';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -170,6 +174,11 @@ async function startServer() {
   try {
     db.exec("ALTER TABLE messages ADD COLUMN fileSize INTEGER");
   } catch(e) {}
+
+  try { db.exec("ALTER TABLE messages ADD COLUMN folderName TEXT"); } catch(e) {}
+  try { db.exec("ALTER TABLE messages ADD COLUMN folderFiles TEXT"); } catch(e) {}
+  try { db.exec("ALTER TABLE posts ADD COLUMN folderName TEXT"); } catch(e) {}
+  try { db.exec("ALTER TABLE posts ADD COLUMN folderFiles TEXT"); } catch(e) {}
 
   // Ensure uploads directory exists
   const uploadDir = path.join(process.cwd(), 'uploads');
@@ -574,7 +583,7 @@ async function startServer() {
 
   // Create Post
   app.post('/api/posts', requireSession, upload.single('file'), async (req: any, res: any) => {
-    const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize } = req.body;
+    const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize, folderName, folderFiles } = req.body;
     const file = req.file;
     const session = req.session;
 
@@ -582,8 +591,8 @@ async function startServer() {
     const driveFileName = req.body.driveFileName;
     const driveFileType = req.body.driveFileType;
 
-    if (!content && !file && !bodyFileUrl && !driveFileUrl) {
-      return res.status(400).json({ error: 'Must provide content, file, or drive link' });
+    if (!content && !file && !bodyFileUrl && !driveFileUrl && !folderFiles) {
+      return res.status(400).json({ error: 'Must provide content, file, folderFiles or drive link' });
     }
 
     const postId = uuidv4();
@@ -613,11 +622,11 @@ async function startServer() {
     const fileSize = bodyFileSize ? Number(bodyFileSize) : (file ? file.size : null);
 
     const stmt = db.prepare(`
-      INSERT INTO posts (id, sessionId, username, color, avatar, content, parentId, fileUrl, fileName, fileType, fileSize, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO posts (id, sessionId, username, color, avatar, content, parentId, fileUrl, fileName, fileType, fileSize, folderName, folderFiles, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    stmt.run(postId, session.id, session.username, session.color, session.avatar, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, expiresAt);
+    stmt.run(postId, session.id, session.username, session.color, session.avatar, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, folderName || null, folderFiles || null, expiresAt);
 
     const newPost = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
     
@@ -755,7 +764,7 @@ async function startServer() {
   // Send Message
   app.post('/api/messages/:username', requireSession, upload.single('file'), async (req: any, res: any) => {
     const receiverUsername = req.params.username;
-    const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize } = req.body;
+    const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize, folderName, folderFiles } = req.body;
     const file = req.file;
     const session = req.session;
 
@@ -805,11 +814,11 @@ async function startServer() {
     const fileSize = bodyFileSize ? Number(bodyFileSize) : (file ? file.size : null);
 
     const stmt = db.prepare(`
-      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, parentId, fileUrl, fileName, fileType, fileSize, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, parentId, fileUrl, fileName, fileType, fileSize, folderName, folderFiles, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    stmt.run(msgId, session.id, session.username, receiverUsername, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, expiresAt);
+    stmt.run(msgId, session.id, session.username, receiverUsername, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, folderName || null, folderFiles || null, expiresAt);
 
     const newMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
     
@@ -821,6 +830,79 @@ async function startServer() {
     
     res.json(newMsg);
   });
+
+
+  const handleFolderDownload = (req: any, res: any, item: any) => {
+    if (!item || !item.folderFiles) {
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+
+    let files = [];
+    try {
+      files = JSON.parse(item.folderFiles);
+    } catch (e) {
+      return res.status(500).json({ error: 'Invalid folder data' });
+    }
+
+    const archive = archiver('zip', {
+      zlib: { level: 1 } // fast
+    });
+
+    res.attachment(`${item.folderName || 'Folder'}.zip`);
+    archive.pipe(res);
+
+    const fetchAndAppend = (fileObj: any) => {
+      return new Promise<void>((resolve) => {
+        const { name, fileUrl } = fileObj;
+        if (!fileUrl) return resolve();
+
+        if (fileUrl.startsWith('http')) {
+          const client = fileUrl.startsWith('https') ? https : http;
+          client.get(fileUrl, (response) => {
+            if (response.statusCode === 200) {
+              archive.append(response, { name });
+              response.on('end', () => resolve());
+              response.on('error', () => resolve());
+            } else {
+              resolve(); // Skip failed
+            }
+          }).on('error', () => resolve());
+        } else {
+          // Local file
+          const filePath = path.join(process.cwd(), fileUrl.startsWith('/') ? fileUrl.slice(1) : fileUrl);
+          if (fs.existsSync(filePath)) {
+            archive.file(filePath, { name });
+          }
+          resolve();
+        }
+      });
+    };
+
+    const processFiles = async () => {
+      for (const f of files) {
+        await fetchAndAppend(f);
+      }
+      archive.finalize();
+    };
+
+    processFiles();
+  };
+
+  app.get('/api/messages/:id/download-folder', requireSession, (req: any, res: any) => {
+    const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;
+    if (!msg) return res.status(404).json({ error: 'Not found' });
+    if (msg.senderUsername !== req.session.username && msg.receiverUsername !== req.session.username) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    handleFolderDownload(req, res, msg);
+  });
+
+  app.get('/api/posts/:id/download-folder', requireSession, (req: any, res: any) => {
+    const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(req.params.id) as any;
+    if (!post) return res.status(404).json({ error: 'Not found' });
+    handleFolderDownload(req, res, post);
+  });
+
 
   // Toggle Pin Message
   app.post('/api/messages/:id/pin', requireSession, (req: any, res: any) => {
@@ -1065,7 +1147,11 @@ async function startServer() {
   // --- Vite Middleware ---
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      root: process.cwd(),
+      server: { 
+        middlewareMode: true,
+        hmr: { server: httpServer }
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);

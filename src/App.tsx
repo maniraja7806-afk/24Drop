@@ -41,7 +41,7 @@ export default function App() {
   };
 
   if (loading) {
-    return <div className="h-[100dvh] min-h-screen bg-neutral-950 flex items-center justify-center text-white">Loading...</div>;
+    return <div className="h-full min-h-screen bg-neutral-950 flex items-center justify-center text-white">Loading...</div>;
   }
 
   return session ? <MainApp session={session} onLogout={logout} /> : <Landing onClaim={setSession} />;

@@ -52,7 +52,7 @@ export function AudioTrimmer({
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
   const [playbackProgress, setPlaybackProgress] = useState(0); // 0 to 1 relative to full duration
-  const animationRef = useRef<number>();
+  const animationRef = useRef<number | undefined>(undefined);
   const startTimeRef = useRef<number>(0);
 
   useEffect(() => {

@@ -88,7 +88,7 @@ export function Landing({ onClaim }: { onClaim: (session: any) => void }) {
   };
 
   return (
-    <div ref={containerRef} className="h-[100dvh] min-h-screen bg-neutral-950 text-white flex flex-col items-center relative overflow-x-hidden overflow-y-auto p-6 scroll-smooth">
+    <div ref={containerRef} className="h-full min-h-screen bg-neutral-950 text-white flex flex-col items-center relative overflow-x-hidden overflow-y-auto p-6 scroll-smooth">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_var(--tw-gradient-stops))] from-neutral-900 via-neutral-950 to-neutral-950 opacity-80" />
       
       <motion.div 

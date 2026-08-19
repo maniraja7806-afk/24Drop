@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Edit2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause, Pin, PinOff, Smile, Database, Reply, ChevronDown } from 'lucide-react';
-import { fetchApi } from '../lib/api';
+import { fetchApi, syncOfflineRequests } from '../lib/api';
 import { socket } from '../lib/socket';
 import { formatBytes } from '../lib/format';
 import { Countdown } from './Countdown';
@@ -18,6 +18,7 @@ import { AudioPlayer } from './AudioPlayer';
 import { ImageCropper } from './ImageCropper';
 import { DissolvingItem } from './DissolvingItem';
 import { FileAttachmentView } from './FileAttachmentView';
+import { FolderAttachmentView } from './FolderAttachmentView';
 import { ReactionPickerPopup, ReactionBubblePill, ReactedUsersModal, getCustomReactions } from './ReactionSystem';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 
@@ -56,7 +57,7 @@ const highlightText = (text: string, query: string) => {
 export function MainApp({ session, onLogout }: { session: any; onLogout: () => void }) {
   useEffect(() => {
     socket.connect();
-    const onConnect = () => socket.emit('join', session.username);
+    const onConnect = () => { socket.emit('join', session.username); syncOfflineRequests(); };
     socket.on('connect', onConnect);
     if (socket.connected) onConnect();
     return () => {
@@ -985,7 +986,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
         />
       )}
 
-      <div className="h-[100dvh] w-full bg-neutral-950 text-white flex flex-col md:flex-row overflow-hidden">
+      <div className="h-full w-full bg-neutral-950 text-white flex flex-col md:flex-row overflow-hidden">
       {/* Sidebar / Topbar */}
       <div className={clsx(
         "w-full md:w-80 bg-neutral-900 border-b md:border-b-0 md:border-r border-white/10 flex-col flex-shrink-0 flex-1 md:flex-none",
@@ -1430,7 +1431,16 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         {!!post.isPinned && <span className="text-[10px] ml-2 inline-flex items-center text-blue-400"><Pin className="w-2.5 h-2.5 mr-0.5" fill="currentColor" /></span>}
                       </p>
                     )}
-                    {post.fileUrl && (
+                    {post.folderFiles && post.folderName && (
+                      <FolderAttachmentView
+                        messageId={post.id}
+                        folderName={post.folderName}
+                        folderFiles={post.folderFiles}
+                        isPost={true}
+                        onPreviewFile={(f) => setViewingFile({ url: f.url, type: f.type, name: f.name })}
+                      />
+                    )}
+                    {post.fileUrl && !post.folderFiles && (
                       <FileAttachmentView
                         fileUrl={post.fileUrl}
                         fileName={post.fileName}
@@ -1777,7 +1787,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                                 <span>@{parentMsg.senderUsername}</span>
                               </div>
                               <div className="truncate opacity-80 text-[11px] font-normal">
-                                {parentMsg.content || parentMsg.fileName || (parentMsg.fileUrl ? 'Media attachment' : 'Message')}
+                                {parentMsg.content || (parentMsg.folderName ? `Folder: ${parentMsg.folderName}` : (parentMsg.fileName || (parentMsg.fileUrl ? 'Media attachment' : 'Message')))}
                               </div>
                             </div>
                           )}
@@ -1789,7 +1799,16 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                               {msg.isEdited === 1 && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
                             </div>
                           )}
-                          {msg.fileUrl && (
+                          {msg.folderFiles && msg.folderName && (
+                            <FolderAttachmentView
+                              messageId={msg.id}
+                              folderName={msg.folderName}
+                              folderFiles={msg.folderFiles}
+                              isPost={false}
+                              onPreviewFile={(f) => setViewingFile({ url: f.url, type: f.type, name: f.name })}
+                            />
+                          )}
+                          {msg.fileUrl && !msg.folderFiles && (
                             <FileAttachmentView
                               fileUrl={msg.fileUrl}
                               fileName={msg.fileName}
