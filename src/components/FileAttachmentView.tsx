@@ -1,7 +1,29 @@
-import React from 'react';
-import { Download, FileText, FileArchive, FileCode, Video, Music, File, Eye } from 'lucide-react';
+import React, { useState } from 'react';
+import { Download, FileText, FileArchive, FileCode, Video, Music, File, Eye, Check } from 'lucide-react';
 import { formatBytes, getFileCategory } from '../lib/format';
 import { AudioPlayer } from './AudioPlayer';
+
+const DownloadButton = ({ href, download, title, iconClass = "w-3.5 h-3.5", buttonClass = "p-1 hover:bg-white/10 rounded text-neutral-300 hover:text-white transition-colors" }: any) => {
+  const [downloading, setDownloading] = useState(false);
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDownloading(true);
+    setTimeout(() => setDownloading(false), 2000);
+  };
+
+  return (
+    <a 
+      href={href} 
+      download={download} 
+      onClick={handleClick} 
+      className={buttonClass}
+      title={title}
+    >
+      {downloading ? <Check className={`${iconClass} text-green-400`} /> : <Download className={iconClass} />}
+    </a>
+  );
+};
 
 interface FileAttachmentViewProps {
   fileUrl: string;
@@ -21,6 +43,7 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
   className = ''
 }) => {
   const name = fileName || fileUrl.split('/').pop() || 'Attachment';
+  const sessionId = localStorage.getItem('sessionId');
   const category = getFileCategory(fileType, name);
 
   if (category === 'image') {
@@ -37,15 +60,11 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           <span className="truncate font-medium max-w-full flex-1 min-w-0" title={name}>{name}</span>
           <div className="flex items-center space-x-2 flex-shrink-0">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
-            <a 
-              href={fileUrl} 
+            <DownloadButton 
+              href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
               download={name} 
-              onClick={(e) => e.stopPropagation()} 
-              className="p-1 hover:bg-white/10 rounded text-neutral-300 hover:text-white transition-colors"
               title="Download image"
-            >
-              <Download className="w-3.5 h-3.5" />
-            </a>
+            />
           </div>
         </div>
       </div>
@@ -67,14 +86,11 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
-            <a 
-              href={fileUrl} 
+            <DownloadButton 
+              href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
               download={name} 
-              className="p-1 hover:bg-white/10 rounded text-neutral-300 hover:text-white transition-colors"
               title="Download video"
-            >
-              <Download className="w-3.5 h-3.5" />
-            </a>
+            />
           </div>
         </div>
       </div>
@@ -91,14 +107,11 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
-            <a 
-              href={fileUrl} 
+            <DownloadButton 
+              href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
               download={name} 
-              className="p-1 hover:bg-white/10 rounded text-neutral-300 hover:text-white transition-colors"
               title="Download audio"
-            >
-              <Download className="w-3.5 h-3.5" />
-            </a>
+            />
           </div>
         </div>
         <AudioPlayer src={fileUrl} />
@@ -149,14 +162,13 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
             <Eye className="w-4 h-4" />
           </button>
         )}
-        <a 
-          href={fileUrl} 
-          download={name}
-          className="p-2 hover:bg-white/10 rounded-lg text-neutral-400 hover:text-white transition-colors"
+        <DownloadButton 
+          href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
+          download={name} 
           title="Download file"
-        >
-          <Download className="w-4 h-4" />
-        </a>
+          iconClass="w-4 h-4"
+          buttonClass="p-2 hover:bg-white/10 rounded-lg text-neutral-400 hover:text-white transition-colors"
+        />
       </div>
     </div>
   );

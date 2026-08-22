@@ -265,7 +265,7 @@ async function startServer() {
 
   // Session middleware
   const requireSession = (req: any, res: any, next: any) => {
-    const sessionId = req.headers['x-session-id'];
+    const sessionId = req.headers['x-session-id'] || req.query.sessionId;
     if (!sessionId) return res.status(401).json({ error: 'Missing session' });
     
     const stmt = db.prepare('SELECT * FROM sessions WHERE id = ?');
@@ -492,9 +492,10 @@ async function startServer() {
     let fileSize = file.size;
 
     if (process.env.CLOUDINARY_CLOUD_NAME) {
+      const resourceType = file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/') || file.mimetype.startsWith('audio/') ? "auto" : "raw";
       try {
         const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
+          cloudinary.uploader.upload_large(file.path, { resource_type: resourceType, chunk_size: 20000000 }, (error, result) => {
             if (error) reject(error);
             else resolve(result);
           });
@@ -603,7 +604,8 @@ async function startServer() {
     if (file && !bodyFileUrl && process.env.CLOUDINARY_CLOUD_NAME) {
       try {
         const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
+          const resourceType = file.mimetype.startsWith("image/") || file.mimetype.startsWith("video/") || file.mimetype.startsWith("audio/") ? "auto" : "raw";
+          cloudinary.uploader.upload_large(file.path, { resource_type: resourceType, chunk_size: 20000000 }, (error, result) => {
             if (error) reject(error);
             else resolve(result);
           });
@@ -795,7 +797,8 @@ async function startServer() {
     if (file && !bodyFileUrl && process.env.CLOUDINARY_CLOUD_NAME) {
       try {
         const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_large(file.path, { resource_type: "auto", chunk_size: 20000000 }, (error, result) => {
+          const resourceType = file.mimetype.startsWith("image/") || file.mimetype.startsWith("video/") || file.mimetype.startsWith("audio/") ? "auto" : "raw";
+          cloudinary.uploader.upload_large(file.path, { resource_type: resourceType, chunk_size: 20000000 }, (error, result) => {
             if (error) reject(error);
             else resolve(result);
           });
@@ -897,10 +900,82 @@ async function startServer() {
     handleFolderDownload(req, res, msg);
   });
 
+  const handleIndividualFileDownload = (req: any, res: any, item: any, filenameToDownload: string) => {
+    if (!item || !item.folderFiles) {
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+
+    let files = [];
+    try {
+      files = JSON.parse(item.folderFiles);
+    } catch (e) {
+      return res.status(500).json({ error: 'Invalid folder data' });
+    }
+
+    const fileObj = files.find((f: any) => f.name === filenameToDownload);
+    if (!fileObj || !fileObj.fileUrl) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const { name, fileUrl } = fileObj;
+    const downloadName = (name || '').split('/').pop() || 'download';
+
+    if (fileUrl.startsWith('http')) {
+      const client = fileUrl.startsWith('https') ? https : http;
+      client.get(fileUrl, (response: any) => {
+        if (response.statusCode !== 200) {
+          if (!res.headersSent) {
+            res.status(response.statusCode).send(`
+              <html>
+                <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f5f5f5; color: #333;">
+                  <div style="text-align: center; max-width: 500px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                    <h2 style="margin-top: 0; color: #e53e3e;">Download Failed</h2>
+                    <p>The file could not be downloaded from the remote server (Status ${response.statusCode}).</p>
+                    <p>This is often caused by remote storage restrictions (e.g. Cloudinary blocking PDF delivery). Please try uploading the file again.</p>
+                  </div>
+                </body>
+              </html>
+            `);
+          }
+          return;
+        }
+        res.attachment(downloadName);
+        res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
+        response.pipe(res);
+      }).on('error', () => {
+        if (!res.headersSent) res.status(500).send('Failed to download remote file');
+      });
+    } else {
+      const filePath = path.join(process.cwd(), fileUrl.startsWith('/') ? fileUrl.slice(1) : fileUrl);
+      if (fs.existsSync(filePath)) {
+        res.download(filePath, downloadName);
+      } else {
+        res.status(404).json({ error: 'File not found locally' });
+      }
+    }
+  };
+
+  app.get('/api/messages/:id/download-file', requireSession, (req: any, res: any) => {
+    const filename = req.query.filename;
+    const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;
+    if (!msg) return res.status(404).json({ error: 'Not found' });
+    if (msg.senderUsername !== req.session.username && msg.receiverUsername !== req.session.username) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    handleIndividualFileDownload(req, res, msg, filename);
+  });
+
   app.get('/api/posts/:id/download-folder', requireSession, (req: any, res: any) => {
     const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(req.params.id) as any;
     if (!post) return res.status(404).json({ error: 'Not found' });
     handleFolderDownload(req, res, post);
+  });
+
+  app.get('/api/posts/:id/download-file', requireSession, (req: any, res: any) => {
+    const filename = req.query.filename;
+    const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(req.params.id) as any;
+    if (!post) return res.status(404).json({ error: 'Not found' });
+    handleIndividualFileDownload(req, res, post, filename);
   });
 
 

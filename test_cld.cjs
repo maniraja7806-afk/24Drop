@@ -1,0 +1,9 @@
+require('dotenv').config();
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+  cloud_name: 'qcpreuzv', // From the URL
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+const url = cloudinary.url("dvdwcxjrdderhuztaow3", { sign_url: true, resource_type: "image", format: "pdf" });
+console.log(url);

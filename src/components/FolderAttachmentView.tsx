@@ -1,8 +1,33 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Download, Folder, Eye, X, FileText, FileArchive, FileCode, Video, Music, File, Search, ChevronRight, ChevronDown } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Download, Folder, Eye, X, FileText, FileArchive, FileCode, Video, Music, File, Search, ChevronRight, ChevronDown, Check } from 'lucide-react';
 import { formatBytes, getFileCategory } from '../lib/format';
 import { motion, AnimatePresence } from 'motion/react';
 import clsx from 'clsx';
+
+const DownloadButton = ({ href, download, title, iconClass = "w-3.5 h-3.5", buttonClass = "p-1 hover:bg-white/10 rounded text-neutral-300 hover:text-white transition-colors", children, className }: any) => {
+  const [downloading, setDownloading] = useState(false);
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDownloading(true);
+    setTimeout(() => setDownloading(false), 2000);
+  };
+
+  return (
+    <a 
+      href={href} 
+      download={download} 
+      onClick={handleClick} 
+      className={className || buttonClass}
+      title={title}
+      aria-label={title}
+    >
+      {downloading ? <Check className={`${iconClass} text-green-400`} /> : <Download className={iconClass} />}
+      {children}
+    </a>
+  );
+};
 
 interface FolderAttachmentViewProps {
   messageId: string;
@@ -23,15 +48,21 @@ type FileNode = {
 const FileTree: React.FC<{
   node: FileNode;
   level: number;
+  messageId: string;
+  isPost?: boolean;
   onPreviewFile?: (file: any) => void;
   getIconForCategory: (cat: string) => React.ReactNode;
   getFileCategory: (type: string, name: string) => string;
   formatBytes: (bytes: number) => string;
-}> = ({ node, level, onPreviewFile, getIconForCategory, getFileCategory, formatBytes }) => {
+}> = ({ node, level, messageId, isPost, onPreviewFile, getIconForCategory, getFileCategory, formatBytes }) => {
   const [isOpen, setIsOpen] = useState(true);
+  const sessionId = localStorage.getItem('sessionId');
 
   if (node.file) {
     const category = getFileCategory(node.file.type, node.name);
+    const fileDownloadUrl = (isPost ? `/api/posts/${messageId}/download-file` : `/api/messages/${messageId}/download-file`);
+    const individualDownloadHref = `${fileDownloadUrl}?filename=${encodeURIComponent(node.file.name || node.name)}${sessionId ? `&sessionId=${sessionId}` : ''}`;
+    
     return (
       <div 
         className="group flex items-center justify-between py-3 px-3 hover:bg-white/5 rounded-lg transition-colors cursor-pointer min-h-[56px]"
@@ -57,16 +88,13 @@ const FileTree: React.FC<{
         </div>
         
         <div className="flex items-center space-x-1 flex-shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-          <a 
-            href={node.file.fileUrl}
+          <DownloadButton 
+            href={individualDownloadHref}
             download={node.name}
-            onClick={(e) => e.stopPropagation()}
-            aria-label="Download file"
             className="p-2 text-neutral-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
             title="Download File"
-          >
-            <Download className="w-4 h-4" />
-          </a>
+            iconClass="w-4 h-4"
+          />
         </div>
       </div>
     );
@@ -84,7 +112,7 @@ const FileTree: React.FC<{
         <span className="text-sm font-medium">{node.name}</span>
       </div>
       {isOpen && node.children && (
-        <div className="flex flex-col">
+        <div className="flex flex-col gap-1">
           {Object.values(node.children).sort((a, b) => {
             if (a.children && !b.children) return -1;
             if (!a.children && b.children) return 1;
@@ -94,6 +122,8 @@ const FileTree: React.FC<{
               key={child.name} 
               node={child} 
               level={level + 1} 
+              messageId={messageId}
+              isPost={isPost}
               onPreviewFile={onPreviewFile}
               getIconForCategory={getIconForCategory}
               getFileCategory={getFileCategory}
@@ -158,23 +188,24 @@ const [isModalOpen, setIsModalOpen] = useState(false);
   const filteredFiles = useMemo(() => {
     if (!searchQuery.trim()) return files;
     const q = searchQuery.toLowerCase();
-    return files.filter(f => f.name.toLowerCase().includes(q));
+    return files.filter(f => f.name?.toLowerCase().includes(q));
   }, [files, searchQuery]);
 
   // Build a tree or sort by folders first
   const sortedFiles = useMemo(() => {
     return [...filteredFiles].sort((a, b) => {
-      const aParts = a.name.split('/');
-      const bParts = b.name.split('/');
+      const aParts = (a.name || '').split('/');
+      const bParts = (b.name || '').split('/');
       // If one is in a folder and other is not
       if (aParts.length !== bParts.length) {
         return bParts.length - aParts.length; // More parts = deeper = folder
       }
-      return a.name.localeCompare(b.name);
+      return (a.name || '').localeCompare(b.name || '');
     });
   }, [filteredFiles]);
 
-  const downloadUrl = isPost ? `/api/posts/${messageId}/download-folder` : `/api/messages/${messageId}/download-folder`;
+  const sessionId = localStorage.getItem('sessionId');
+  const downloadUrl = (isPost ? `/api/posts/${messageId}/download-folder` : `/api/messages/${messageId}/download-folder`) + (sessionId ? `?sessionId=${sessionId}` : '');
 
   const getIconForCategory = (category: string) => {
     switch (category) {
@@ -212,35 +243,32 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         </div>
 
         <div className="flex-shrink-0">
-          <a 
+          <DownloadButton 
             href={downloadUrl}
-            onClick={(e) => e.stopPropagation()}
-            title="Download folder"
-            aria-label="Download folder"
             className="p-2.5 bg-white/5 hover:bg-white/10 rounded-lg text-neutral-300 hover:text-white transition-colors flex items-center justify-center border border-white/5 hover:border-white/10"
-          >
-            <Download className="w-5 h-5" />
-          </a>
+            title="Download folder"
+            iconClass="w-5 h-5"
+          />
         </div>
       </div>
 
-      <AnimatePresence>
-        {isModalOpen && (
-          <div 
-            className="fixed inset-0 z-[60] flex flex-col items-center justify-center p-4 sm:p-8 bg-black/60 backdrop-blur-sm overscroll-none"
-            style={{ paddingBottom: composerHeight ? `${composerHeight + 16}px` : undefined }}
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsModalOpen(false);
-            }}
-          >
-            <motion.div 
-              onClick={(e) => e.stopPropagation()}
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-neutral-900 border border-white/10 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col h-[380px] max-h-full"
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {isModalOpen && (
+            <div 
+              className="fixed inset-0 z-[60] flex items-center justify-center p-4 sm:p-8 bg-black/60 backdrop-blur-sm overscroll-none"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsModalOpen(false);
+              }}
             >
+              <motion.div 
+                onClick={(e) => e.stopPropagation()}
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-neutral-900 border border-white/10 rounded-2xl w-full max-w-lg shadow-2xl flex flex-col h-[620px] max-h-[90dvh] overflow-hidden"
+              >
               {/* Header */}
               <div className="flex-shrink-0 px-5 py-4 border-b border-white/10 flex items-center justify-between bg-neutral-950">
                 <div className="flex items-center space-x-3 min-w-0">
@@ -275,7 +303,10 @@ const [isModalOpen, setIsModalOpen] = useState(false);
               </div>
 
                             {/* File List */}
-              <div className="flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-2 pb-4 space-y-1 custom-scrollbar">
+              <div 
+                className="flex flex-col overflow-x-hidden px-2 pt-3 pb-4 gap-1 custom-scrollbar min-h-[180px]"
+                style={{ flex: '1 1 auto', minHeight: '180px', overflowY: 'auto', overscrollBehavior: 'contain' }}
+              >
                 {(() => {
                   if (filteredFiles.length === 0) {
                     return (
@@ -292,6 +323,10 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                       const filename = parts.pop();
                       const path = parts.join('/');
                       const category = getFileCategory(file.type, filename);
+                      
+                      const fileDownloadUrl = (isPost ? `/api/posts/${messageId}/download-file` : `/api/messages/${messageId}/download-file`);
+                      const individualDownloadHref = `${fileDownloadUrl}?filename=${encodeURIComponent(file.name)}${sessionId ? `&sessionId=${sessionId}` : ''}`;
+                      
                       return (
                         <div 
                           key={`${file.name}-${idx}`}
@@ -323,16 +358,13 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                           </div>
                           
                           <div className="flex items-center space-x-1 flex-shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                            <a 
-                              href={file.fileUrl}
+                            <DownloadButton 
+                              href={individualDownloadHref}
                               download={filename}
-                              onClick={(e) => e.stopPropagation()}
-                              aria-label="Download file"
                               className="p-2 text-neutral-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
                               title="Download File"
-                            >
-                              <Download className="w-4 h-4" />
-                            </a>
+                              iconClass="w-4 h-4"
+                            />
                           </div>
                         </div>
                       );
@@ -341,20 +373,29 @@ const [isModalOpen, setIsModalOpen] = useState(false);
 
                   // Tree structure for normal viewing
                   const tree: { [key: string]: FileNode } = {};
+                  const commonRoot = files.length > 0 ? (files[0].name || '').split('/')[0] : '';
+                  const hasCommonRoot = files.length > 0 && files.every(f => (f.name || '').split('/')[0] === commonRoot);
+                  
                   files.forEach(file => {
-                    const parts = file.name.split('/');
-                    // Skip the top level folder name if it matches the main folderName
-                    if (parts[0] === folderName && parts.length > 1) {
+                    const parts = (file.name || '').split('/');
+                    // Skip the top level folder name if it exists, regardless of current folderName
+                    if (hasCommonRoot && parts[0] === commonRoot && parts.length > 1) {
                       parts.shift();
                     }
                     
-                    let currentLevel = tree;
+                    let currentLevel: any = tree;
                     parts.forEach((part, i) => {
                       if (i === parts.length - 1) {
-                        currentLevel[part] = { name: part, file };
+                        if (!currentLevel[part]) {
+                          currentLevel[part] = { name: part, file };
+                        } else {
+                          currentLevel[part].file = file;
+                        }
                       } else {
                         if (!currentLevel[part]) {
                           currentLevel[part] = { name: part, children: {} };
+                        } else if (!currentLevel[part].children) {
+                          currentLevel[part].children = {};
                         }
                         currentLevel = currentLevel[part].children;
                       }
@@ -369,7 +410,9 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                     <FileTree 
                       key={node.name} 
                       node={node} 
-                      level={0} 
+                      level={0}
+                      messageId={messageId}
+                      isPost={isPost} 
                       onPreviewFile={onPreviewFile}
                       getIconForCategory={getIconForCategory}
                       getFileCategory={getFileCategory}
@@ -380,18 +423,21 @@ const [isModalOpen, setIsModalOpen] = useState(false);
               </div>
                             {/* Footer */}
               <div className="flex-shrink-0 p-4 border-t border-white/10 bg-neutral-950">
-                <a 
+                <DownloadButton 
                   href={downloadUrl}
                   className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-sm font-medium text-white transition-colors flex items-center justify-center space-x-2 shadow-lg shadow-indigo-900/20"
+                  title="Download Folder"
+                  iconClass="w-5 h-5"
                 >
-                  <Download className="w-5 h-5" />
                   <span>Download Folder</span>
-                </a>
+                </DownloadButton>
               </div>
             </motion.div>
           </div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>,
+      document.body
+      )}
     </>
   );
 };
