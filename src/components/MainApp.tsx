@@ -1,10 +1,14 @@
+import { useChatScroll } from '../hooks/useChatScroll';
+import { useChatSocket } from '../hooks/useChatSocket';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from 'motion/react';
 import { Search, Globe, LogOut, Send, Image as ImageIcon, X, Trash2, Edit2, Plus, Mic, AudioLines, Sparkles, Telescope, Cpu, Paperclip, Check, CheckCheck, Copy, Loader2, Triangle, Upload, Camera, Square, Play, Pause, Pin, PinOff, Smile, Database, Reply, ChevronDown } from 'lucide-react';
 import { fetchApi, syncOfflineRequests } from '../lib/api';
 import { socket } from '../lib/socket';
 import { formatBytes } from '../lib/format';
 import { Countdown } from './Countdown';
+import { format } from 'date-fns';
 import clsx from 'clsx';
 import { initAuth, googleSignIn, getAccessToken } from '../lib/auth';
 import { loadPickerApi, openPicker } from '../lib/picker';
@@ -99,15 +103,11 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     fetchChats();
   }, []);
 
-  useEffect(() => {
-    const handleGlobalNewMessage = (msg: any) => {
-      fetchChats();
-    };
-    socket.on("new_message", handleGlobalNewMessage);
-    return () => {
-      socket.off("new_message", handleGlobalNewMessage);
-    };
-  }, []);
+
+  
+
+
+  
 
   const [posts, setPosts] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
@@ -119,26 +119,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     setReplyToMessage(null);
   }, [activeChat]);
 
-  useEffect(() => {
-    fetchApi('/api/storage/usage').then(setStorageUsage).catch(() => {});
-    
-    const handleStorageUpdated = (data: any) => {
-      if (data) {
-        setStorageUsage(data);
-      }
-    };
-
-    socket.on('storage_updated', handleStorageUpdated);
-
-    const interval = setInterval(() => {
-      fetchApi('/api/storage/usage').then(setStorageUsage).catch(() => {});
-    }, 30000); // refresh every 30s as backup
-    
-    return () => {
-      socket.off('storage_updated', handleStorageUpdated);
-      clearInterval(interval);
-    };
-  }, []);
+  
 
   useEffect(() => {
     if (globalSearchQuery.length > 2) {
@@ -153,168 +134,22 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     }
   }, [globalSearchQuery]);
 
-  useEffect(() => {
-    fetchApi("/api/posts").then(setPosts).catch(console.error);
-    socket.on("new_post", (post) => setPosts((p) => {
-      if (p.find((x) => x.id === post.id)) return p;
-      return [...p, post];
-    }));
-    socket.on("delete_post", (id) => setPosts((p) => p.filter((x) => x.id !== id)));
-    socket.on("edit_post", ({ postId, content }) => setPosts((p) => p.map(x => x.id === postId ? { ...x, content } : x)));
-    socket.on("post_pinned", ({ postId, isPinned, replaced }) => {
-      setPosts((p) => p.map(x => x.id === postId ? { ...x, isPinned } : x));
-      if (replaced) {
-        setToastMessage("📌 Oldest pinned message replaced.");
-        setTimeout(() => setToastMessage(null), 3000);
-      }
-    });
-    socket.on("post_reaction", ({ postId, username, emoji, removed }: any) => {
-      setPosts((p) =>
-        p.map((post) => {
-          if (post.id !== postId) return post;
-          const reactions = post.reactions || [];
-          if (removed) {
-            return { ...post, reactions: reactions.filter((r: any) => !(r.username === username && r.emoji === emoji)) };
-          } else {
-            const cleaned = reactions.filter((r: any) => r.username !== username);
-            return { ...post, reactions: [...cleaned, { username, emoji }] };
-          }
-        })
-      );
-    });
-    return () => {
-      socket.off("new_post");
-      socket.off("delete_post");
-      socket.off("edit_post");
-      socket.off("post_reaction");
-    };
-  }, []);
+  
 
-  useEffect(() => {
-    if (!activeChat) return;
+  
 
-    const loadMessages = () => {
-      fetchApi(`/api/messages/${activeChat}`)
-        .then((data) => {
-          setMessages(data);
-          scrollToBottom(false);
-          setTimeout(() => scrollToBottom(false), 60);
-          setTimeout(() => scrollToBottom(false), 200);
-        })
-        .catch(console.error);
-    };
-
-    loadMessages();
-
-    const handleSocketReconnect = () => {
-      loadMessages();
-    };
-
-    socket.on("connect", handleSocketReconnect);
-    socket.on("reconnect", handleSocketReconnect);
-
-    const handleNewMessage = (msg: any) => {
-      console.log('Received new_message:', msg, 'activeChat:', activeChat);
-      const recipient = msg.recipientUsername || msg.receiverUsername;
-      if (msg.senderUsername === activeChat || recipient === activeChat) {
-        setMessages((m) => {
-          if (m.find((x) => x.id === msg.id)) return m;
-          return [...m, msg];
-        });
-      }
-    };
-    const handleReaction = ({ messageId, username, emoji, removed }: any) => {
-      setMessages((m) =>
-        m.map((msg) => {
-          if (msg.id !== messageId) return msg;
-          const reactions = msg.reactions || [];
-          if (removed) {
-            return { ...msg, reactions: reactions.filter((r: any) => !(r.username === username && r.emoji === emoji)) };
-          } else {
-            const cleaned = reactions.filter((r: any) => r.username !== username);
-            return { ...msg, reactions: [...cleaned, { username, emoji }] };
-          }
-        })
-      );
-    };
-    
-    const handleMessagesSeen = ({ by, seenAt }: any) => {
-      setMessages((m) => m.map(msg => {
-        if (msg.senderUsername === session.username && msg.receiverUsername === by && msg.status !== 'seen') {
-          return { ...msg, status: 'seen', seenAt };
-        }
-        return msg;
-      }));
-    };
-    
-    const handleStatusUpdate = ({ messageId, status }: any) => {
-      setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, status } : msg));
-    };
-
-    const handleMessagePinned = ({ messageId, isPinned, replaced }: any) => {
-      setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, isPinned } : msg));
-      if (replaced) {
-        setToastMessage("📌 Oldest pinned message replaced.");
-        setTimeout(() => setToastMessage(null), 3000);
-      }
-    };
-
-    const handleEditMessage = ({ messageId, content }: any) => {
-      setMessages((m) => m.map(msg => msg.id === messageId ? { ...msg, content, isEdited: 1 } : msg));
-    };
-
-    const handleDeleteMessage = ({ messageId }: any) => {
-      setMessages((m) => m.filter(msg => msg.id !== messageId));
-    };
-
-    socket.on("new_message", handleNewMessage);
-    socket.on("message_reaction", handleReaction);
-    socket.on("messages_seen", handleMessagesSeen);
-    socket.on("message_status_update", handleStatusUpdate);
-    socket.on("message_pinned", handleMessagePinned);
-    socket.on("edit_message", handleEditMessage);
-    socket.on("delete_message", handleDeleteMessage);
-    
-    return () => {
-      socket.off("connect", handleSocketReconnect);
-      socket.off("reconnect", handleSocketReconnect);
-      socket.off("new_message", handleNewMessage);
-      socket.off("message_reaction", handleReaction);
-      socket.off("messages_seen", handleMessagesSeen);
-      socket.off("message_status_update", handleStatusUpdate);
-      socket.off("message_pinned", handleMessagePinned);
-      socket.off("edit_message", handleEditMessage);
-      socket.off("delete_message", handleDeleteMessage);
-    };
-  }, [activeChat]);
-
-  useEffect(() => {
-    const handleTyping = ({ from, avatar, color }: any) => {
-      if (view === "chat" && from === activeChat) {
-        setTypingUsers((prev) => {
-          if (prev.find((u) => u.username === from)) return prev;
-          return [...prev, { username: from, avatar, color }];
-        });
-      }
-    };
-    const handleStopTyping = ({ from }: any) => {
-      setTypingUsers((prev) => prev.filter((u) => u.username !== from));
-    };
-    socket.on("typing", handleTyping);
-    socket.on("stop_typing", handleStopTyping);
-    return () => {
-      socket.off("typing", handleTyping);
-      socket.off("stop_typing", handleStopTyping);
-    };
-  }, [view, activeChat]);
+  
 
   
   const [file, setFile] = useState<File | null>(null);
 
   const [typingUsers, setTypingUsers] = useState<{username: string, avatar: string, color: string}[]>([]);
   const [isTyping, setIsTyping] = useState(false);
-  const [viewingFile, setViewingFile] = useState<{url: string, type: string, name: string} | null>(null);
+  const [viewingFile, setViewingFile] = useState<{url: string, type: string, name: string, downloadUrl?: string} | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(true);
+
+  
+
 
   useEffect(() => {
     if (viewingFile) {
@@ -349,273 +184,35 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
     const [activeMenuMsg, setActiveMenuMsg] = useState<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const [isAtBottom, setIsAtBottom] = useState(true);
-  const isAtBottomRef = useRef(true);
-  const isProgrammaticScrollRef = useRef(false);
-  const targetScrollTopRef = useRef<number | null>(null);
-  const programTimerRef = useRef<any>(null);
-  const activeScrollRafRef = useRef<number | null>(null);
+  const {
+    scrollContainerRef,
+    isAtBottom,
+    unreadCount,
+    setUnreadCount,
+    scrollToBottom,
+    handleScroll
+  } = useChatScroll({
+    messages,
+    posts,
+    view,
+    activeChat,
+    activeThread,
+    onScrollAction: () => setActiveMenuMsg(null)
+  });
 
-  const updateIsAtBottom = (val: boolean) => {
-    isAtBottomRef.current = val;
-    setIsAtBottom(val);
-  };
+  useChatSocket({
+    session,
+    activeChat,
+    view,
+    setPosts,
+    setMessages,
+    setTypingUsers,
+    setToastMessage,
+    setStorageUsage,
+    fetchChats,
+    scrollToBottom
+  });
 
-  const [unreadCount, setUnreadCount] = useState(0);
-  const prevMessagesLengthRef = useRef(0);
-  const prevPostsLengthRef = useRef(0);
-  const prevLastMsgIdRef = useRef<string | null>(null);
-  const prevLastPostIdRef = useRef<string | null>(null);
-
-  // Attach user interaction listeners to know when user manually scrolls away
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const handleUserInteraction = () => {
-      if (activeScrollRafRef.current !== null) {
-        cancelAnimationFrame(activeScrollRafRef.current);
-        activeScrollRafRef.current = null;
-      }
-      isProgrammaticScrollRef.current = false;
-      if (programTimerRef.current) {
-        clearTimeout(programTimerRef.current);
-        programTimerRef.current = null;
-      }
-    };
-
-    container.addEventListener('wheel', handleUserInteraction, { passive: true });
-    container.addEventListener('touchstart', handleUserInteraction, { passive: true });
-    container.addEventListener('pointerdown', handleUserInteraction, { passive: true });
-
-    return () => {
-      container.removeEventListener('wheel', handleUserInteraction);
-      container.removeEventListener('touchstart', handleUserInteraction);
-      container.removeEventListener('pointerdown', handleUserInteraction);
-    };
-  }, [view, activeChat, activeThread]);
-
-  const scrollToBottom = (smooth = true) => {
-    if (activeScrollRafRef.current !== null) {
-      cancelAnimationFrame(activeScrollRafRef.current);
-      activeScrollRafRef.current = null;
-    }
-
-    isProgrammaticScrollRef.current = true;
-    updateIsAtBottom(true);
-
-    if (programTimerRef.current) clearTimeout(programTimerRef.current);
-
-    requestAnimationFrame(() => {
-      const container = scrollContainerRef.current;
-      if (!container) return;
-
-      setUnreadCount(0);
-
-      const calculateTarget = () => {
-        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-        return maxScroll;
-      };
-
-      let finalScrollTop = calculateTarget();
-      targetScrollTopRef.current = finalScrollTop;
-
-      const startScrollTop = container.scrollTop;
-      const distance = finalScrollTop - startScrollTop;
-
-      if (!smooth || Math.abs(distance) < 2) {
-        container.scrollTop = finalScrollTop;
-        isProgrammaticScrollRef.current = false;
-        return;
-      }
-
-      // Spring physics parameters for snappy, natural native-like chat auto-scroll
-      const stiffness = 220;
-      const damping = 26;
-      let currentPos = startScrollTop;
-      let velocity = 0;
-      let lastTime = performance.now();
-
-      const animateStep = (now: number) => {
-        finalScrollTop = calculateTarget();
-        targetScrollTopRef.current = finalScrollTop;
-
-        let dt = (now - lastTime) / 1000;
-        lastTime = now;
-        if (dt > 0.064) dt = 0.016; // Guard against frame drops or tab switching
-
-        const displacement = currentPos - finalScrollTop;
-        const springForce = -stiffness * displacement;
-        const dampingForce = -damping * velocity;
-        const acceleration = springForce + dampingForce;
-
-        velocity += acceleration * dt;
-        currentPos += velocity * dt;
-
-        container.scrollTop = currentPos;
-
-        if (Math.abs(currentPos - finalScrollTop) < 0.5 && Math.abs(velocity) < 5) {
-          container.scrollTop = finalScrollTop;
-          activeScrollRafRef.current = null;
-          isProgrammaticScrollRef.current = false;
-        } else {
-          activeScrollRafRef.current = requestAnimationFrame(animateStep);
-        }
-      };
-
-      activeScrollRafRef.current = requestAnimationFrame(animateStep);
-    });
-  };
-
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    setActiveMenuMsg(null);
-    const container = e.currentTarget;
-
-    if (isProgrammaticScrollRef.current) {
-      if (programTimerRef.current) clearTimeout(programTimerRef.current);
-
-      const isCloseToTarget = targetScrollTopRef.current !== null && 
-        Math.abs(container.scrollTop - targetScrollTopRef.current) <= 4;
-      const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-      const isAtMax = Math.abs(container.scrollTop - maxScroll) <= 4;
-
-      if (isCloseToTarget || isAtMax) {
-        isProgrammaticScrollRef.current = false;
-      } else {
-        programTimerRef.current = setTimeout(() => {
-          isProgrammaticScrollRef.current = false;
-        }, 120);
-        return;
-      }
-    }
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    const nearBottom = distanceFromBottom <= 100;
-    updateIsAtBottom(nearBottom);
-    if (nearBottom) {
-      setUnreadCount(0);
-    }
-  };
-
-  // Single requestAnimationFrame-based observer synchronizing scroll container's scrollTop, composer height, and visualViewport
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const composerEl = document.getElementById('chat-composer');
-
-    const reconcileScroll = () => {
-      if (!(view === 'chat' || activeThread)) return;
-
-      if (isProgrammaticScrollRef.current) return;
-
-      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-      const nearBottom = distanceFromBottom <= 100;
-
-      if (nearBottom || isAtBottomRef.current) {
-        scrollToBottom(false);
-      }
-    };
-
-    let syncRafId: number | null = null;
-    const scheduleSync = () => {
-      if (syncRafId !== null) cancelAnimationFrame(syncRafId);
-      syncRafId = requestAnimationFrame(() => {
-        syncRafId = null;
-        reconcileScroll();
-      });
-    };
-
-    const observer = new ResizeObserver(scheduleSync);
-    observer.observe(container);
-    if (composerEl) {
-      observer.observe(composerEl);
-    }
-
-    window.addEventListener('resize', scheduleSync);
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', scheduleSync);
-      window.visualViewport.addEventListener('scroll', scheduleSync);
-    }
-
-    return () => {
-      if (syncRafId !== null) cancelAnimationFrame(syncRafId);
-      observer.disconnect();
-      window.removeEventListener('resize', scheduleSync);
-      if (window.visualViewport) {
-        window.visualViewport.removeEventListener('resize', scheduleSync);
-        window.visualViewport.removeEventListener('scroll', scheduleSync);
-      }
-    };
-  }, [view, activeChat, activeThread]);
-
-  // WhatsApp-like Smart Auto-scroll (Global Sync Fix)
-  useEffect(() => {
-    if (view === 'chat' || activeThread) {
-      const isNewMsgAdded = messages.length > prevMessagesLengthRef.current;
-      const prevLength = prevMessagesLengthRef.current;
-      prevMessagesLengthRef.current = messages.length;
-
-      const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-      const isGenuinelyNewMessage = lastMsg && prevLastMsgIdRef.current && lastMsg.id !== prevLastMsgIdRef.current;
-      prevLastMsgIdRef.current = lastMsg ? lastMsg.id : null;
-
-      if (isNewMsgAdded && messages.length > 0) {
-        if (prevLength === 0) {
-          // Initial chat load
-          scrollToBottom(false);
-        } else if (isGenuinelyNewMessage) {
-          // Genuinely new real-time message appended -> forcefully auto-scroll everyone
-          scrollToBottom(true);
-          // Fallback for image loading layout shifts
-          setTimeout(() => scrollToBottom(true), 100);
-        } else {
-          // Same last message ID, meaning length increased due to historical messages prepending or similar
-          // Do not steal focus/scroll if they are reading up
-          const container = scrollContainerRef.current;
-          const isNearBottom = container ? (container.scrollHeight - container.scrollTop - container.clientHeight < 300) : true;
-          if (!isNearBottom && !isAtBottomRef.current) {
-            setUnreadCount(prev => prev + (messages.length - prevLength));
-          }
-        }
-      } else if (messages.length > 0 && prevLength === 0) {
-        // Initial chat load
-        scrollToBottom(false);
-      }
-    } else if (view === 'feed') {
-      const isNewPostAdded = posts.length > prevPostsLengthRef.current;
-      const prevLength = prevPostsLengthRef.current;
-      prevPostsLengthRef.current = posts.length;
-
-      const lastPost = posts.length > 0 ? posts[posts.length - 1] : null;
-      const isGenuinelyNewPost = lastPost && prevLastPostIdRef.current && lastPost.id !== prevLastPostIdRef.current;
-      prevLastPostIdRef.current = lastPost ? lastPost.id : null;
-
-      if (isNewPostAdded && posts.length > 0) {
-        if (prevLength === 0) {
-          scrollToBottom(false);
-        } else if (isGenuinelyNewPost) {
-          scrollToBottom(true);
-          setTimeout(() => scrollToBottom(true), 100);
-        }
-      } else if (posts.length > 0 && prevLength === 0) {
-        scrollToBottom(false);
-      }
-    }
-  }, [messages, posts, view, activeThread]);
-
-  useEffect(() => {
-    setUnreadCount(0);
-    updateIsAtBottom(true);
-    if (view === 'chat' || activeThread) {
-      prevMessagesLengthRef.current = 0;
-      prevLastMsgIdRef.current = null;
-    } else if (view === 'feed') {
-      prevPostsLengthRef.current = 0;
-      prevLastPostIdRef.current = null;
-    }
-    scrollToBottom(false);
-  }, [activeChat, view, activeThread]);
 
   const [activeReactionMenuId, setActiveReactionMenuId] = useState<string | null>(null);
   const [activeReactionAnimation, setActiveReactionAnimation] = useState<{ id: string; emoji: string; key: number } | null>(null);
@@ -1074,7 +671,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           <div className="p-4 mt-auto border-t border-white/10 bg-neutral-900/60 backdrop-blur-md">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center space-x-1.5 text-xs text-neutral-300 font-medium">
-                <Database className="w-3.5 h-3.5 text-blue-400" />
+                <Database className="w-3 h-3 text-blue-400" />
                 <span>Storage</span>
               </div>
               <span className="text-xs text-neutral-300 font-semibold tracking-tight">
@@ -1105,7 +702,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
               onClick={() => setShowClearStorageModal(true)}
               className="w-full py-1.5 px-3 bg-red-500/10 hover:bg-red-500/20 active:bg-red-500/30 text-red-400 text-xs rounded-lg transition-all active:scale-95 flex items-center justify-center gap-2 border border-red-500/20 font-medium"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-3 h-3" />
               <span>Clear Storage</span>
             </button>
           </div>
@@ -1139,7 +736,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
           </div>
           
           <div className="relative w-28 sm:w-44 md:w-64 flex-shrink-0">
-            <Search className="absolute left-2.5 sm:left-3 top-2.5 w-3.5 h-3.5 sm:w-4 sm:h-4 text-neutral-500 pointer-events-none" />
+            <Search className="absolute left-2.5 sm:left-3 top-2.5 w-3 h-3 sm:w-4 sm:h-4 text-neutral-500 pointer-events-none" />
             <input
               type="text"
               placeholder="Search..."
@@ -1359,6 +956,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                     }}
                     id={`post-${post.id}`}
                     className="bg-neutral-900 border border-white/10 rounded-2xl p-5 shadow-xl relative group select-none cursor-pointer transition-all"
+                    style={{ position: 'relative' }}
                   >
                     {/* Reaction Particle Burst Animation */}
                     {activeReactionAnimation?.id === post.id && (
@@ -1390,7 +988,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                       </div>
                       
                       {/* Top-right actions (Pin and Delete) */}
-                      <div className="absolute top-3 right-3 flex items-center space-x-1.5 z-20">
+                      <div className="flex items-center space-x-1" style={{ position: 'absolute', top: '4px', right: '4px', zIndex: 20 }}>
                         <button
                           aria-label={post.isPinned ? "Unpin post" : "Pin post"}
                           onClick={(e) => {
@@ -1398,14 +996,14 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             togglePostPin(post.id);
                           }}
                           className={clsx(
-                            "p-1.5 border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95",
+                            "p-1 border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95",
                             post.isPinned 
                               ? "bg-blue-600/80 hover:bg-blue-600 text-white" 
                               : "bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white"
                           )}
                           title={post.isPinned ? "Unpin post" : "Pin post"}
                         >
-                          {post.isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+                          {post.isPinned ? <PinOff className="w-3 h-3" /> : <Pin className="w-3 h-3" />}
                         </button>
                         {post.username === session?.username && (
 <button 
@@ -1414,10 +1012,10 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             e.stopPropagation();
                             deletePost(post.id);
                           }}
-                          className="p-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95"
+                          className="p-1 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95"
                           title="Delete post"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3 h-3" />
                         </button>
 )}
                       </div>
@@ -1437,7 +1035,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         folderName={post.folderName}
                         folderFiles={post.folderFiles}
                         isPost={true}
-                        onPreviewFile={(f) => setViewingFile({ url: f.url, type: f.type, name: f.name })}
+                        onPreviewFile={(f) => setViewingFile({ url: f.url, type: f.type, name: f.name, downloadUrl: f.downloadUrl })}
                       />
                     )}
                     {post.fileUrl && !post.folderFiles && (
@@ -1530,9 +1128,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         title="Copy post text"
                       >
                         {copiedMessageId === post.id ? (
-                          <Check className="w-3.5 h-3.5 text-green-400 transition-all scale-110" />
+                          <Check className="w-3 h-3 text-green-400 transition-all scale-110" />
                         ) : (
-                          <Copy className="w-3.5 h-3.5 transition-all" />
+                          <Copy className="w-3 h-3 transition-all" />
                         )}
                         <span>Copy</span>
                       </button>
@@ -1543,7 +1141,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-950/60 shadow-sm"
                         title="Edit post"
                       >
-                        <Edit2 className="w-3.5 h-3.5" />
+                        <Edit2 className="w-3 h-3" />
                         <span>Edit</span>
                       </button>
 )}
@@ -1700,11 +1298,12 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                             toggleMessageReaction(msg.id, defaultEmoji);
                           }}
                           className={clsx(
-                            "px-4 py-2.5 rounded-2xl text-[15px] relative transition-all group/bubble select-none cursor-pointer", 
+                            "pl-4 py-2.5 min-h-[44px] rounded-2xl text-[15px] relative transition-all group/bubble select-none cursor-pointer", 
                             editingMessageId !== msg.id && "active:scale-[0.98]",
-                            isMe ? "bg-white text-black rounded-br-sm" : "bg-neutral-800 text-white rounded-bl-sm",
+                            isMe ? "bg-white text-black rounded-br-sm pr-[54px]" : "bg-neutral-800 text-white rounded-bl-sm pr-[32px]",
                             activeReactionMenuId === msg.id && "ring-2 ring-blue-500/80 shadow-2xl scale-[1.03]"
                           )}
+                          style={{ position: 'relative' }}
                         >
                           {/* Reaction Particle Burst Animation */}
                           {activeReactionAnimation?.id === msg.id && (
@@ -1733,7 +1332,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                           />
 
                           {/* Top-right actions (Pin and Delete) */}
-                          <div className="absolute -top-2 -right-2 flex items-center space-x-1.5 z-20">
+                          <div className="flex items-center space-x-1" style={{ position: 'absolute', top: '4px', right: '4px', zIndex: 20 }}>
                             <button
                               aria-label={msg.isPinned ? "Unpin message" : "Pin message"}
                               onClick={(e) => {
@@ -1741,14 +1340,14 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                                 togglePin(msg.id);
                               }}
                               className={clsx(
-                                "p-1.5 border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95",
+                                "p-1 border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95",
                                 msg.isPinned 
                                   ? "bg-blue-600/80 hover:bg-blue-600 text-white" 
                                   : "bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white"
                               )}
                               title={msg.isPinned ? "Unpin message" : "Pin message"}
                             >
-                              {msg.isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
+                              {msg.isPinned ? <PinOff className="w-3 h-3" /> : <Pin className="w-3 h-3" />}
                             </button>
                             {isMe && (
 <button
@@ -1757,10 +1356,10 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                                 e.stopPropagation();
                                 deleteMessage(msg.id);
                               }}
-                              className="p-1.5 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95"
+                              className="p-1 bg-neutral-800 hover:bg-red-600 text-neutral-300 hover:text-white border border-white/10 rounded-full shadow-md transition-all flex items-center justify-center hover:scale-110 active:scale-95"
                               title="Delete message"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3 h-3" />
                             </button>
 )}
                           </div>
@@ -1805,7 +1404,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                               folderName={msg.folderName}
                               folderFiles={msg.folderFiles}
                               isPost={false}
-                              onPreviewFile={(f) => setViewingFile({ url: f.url, type: f.type, name: f.name })}
+                              onPreviewFile={(f) => setViewingFile({ url: f.url, type: f.type, name: f.name, downloadUrl: f.downloadUrl })}
                             />
                           )}
                           {msg.fileUrl && !msg.folderFiles && (
@@ -1905,9 +1504,9 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         title="Copy message text"
                       >
                         {copiedMessageId === msg.id ? (
-                          <Check className="w-3.5 h-3.5 text-green-400 transition-all scale-110" />
+                          <Check className="w-3 h-3 text-green-400 transition-all scale-110" />
                         ) : (
-                          <Copy className="w-3.5 h-3.5 transition-all" />
+                          <Copy className="w-3 h-3 transition-all" />
                         )}
                         <span>Copy</span>
                       </button>
@@ -1918,19 +1517,19 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                         className="inline-flex items-center space-x-1.5 px-2.5 py-1 text-xs text-neutral-400 hover:text-white hover:bg-white/10 rounded-md transition-colors border border-white/5 bg-neutral-900/60 shadow-sm"
                         title="Edit message"
                       >
-                        <Edit2 className="w-3.5 h-3.5" />
+                        <Edit2 className="w-3 h-3" />
                         <span>Edit</span>
                       </button>
 )}
                     </div>
 
                     <div className="text-[10px] text-neutral-500 mt-1 flex items-center space-x-1.5">
-                      {msg.isPinned && (
+                      {!!msg.isPinned && (
                         <div className="flex items-center text-blue-400" title="Pinned message">
                           <Pin className="w-3 h-3 fill-current rotate-45" />
                         </div>
                       )}
-                      <span>{new Date(msg.createdAt.replace(' ', 'T') + (!msg.createdAt.endsWith('Z') ? 'Z' : '')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      <span>{format(new Date(msg.createdAt.replace(' ', 'T') + (!msg.createdAt.endsWith('Z') ? 'Z' : '')), 'h:mm a').toLowerCase()}</span>
                       {!activeThread && replyCount > 0 && (
                         <>
                           <span>•</span>
@@ -1950,7 +1549,7 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
                                 animate={{ opacity: 1, scale: 1 }} 
                                 exit={{ opacity: 0, scale: 0.8 }} 
                                 transition={{ duration: 0.2 }}
-                                title={msg.seenAt ? `Read at ${new Date(msg.seenAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}` : 'Read'}
+                                title={msg.seenAt ? `Read at ${format(new Date(msg.seenAt), 'h:mm:ss a').toLowerCase()}` : 'Read'}
                               >
                                 <CheckCheck className="w-3 h-3 text-blue-400" />
                               </motion.div>
@@ -2091,94 +1690,95 @@ export function MainApp({ session, onLogout }: { session: any; onLogout: () => v
       )}
       </div>
 
-      <AnimatePresence>
-        {viewingFile && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 md:p-8"
-            onClick={() => setViewingFile(null)}
-          >
-            <button
-              aria-label="Close preview"
-              onClick={() => setViewingFile(null)}
-              className="absolute top-4 right-4 z-10 p-2 bg-neutral-800/80 hover:bg-neutral-700/80 backdrop-blur rounded-full text-white transition-colors"
-            >
-              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-            
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {viewingFile && (
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              transition={{ type: "spring", damping: 25, stiffness: 300 }}
-              className="relative w-full max-w-5xl h-full max-h-[90vh] bg-neutral-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
-              onClick={(e) => e.stopPropagation()}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[200] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4 md:p-8"
+              onClick={() => setViewingFile(null)}
             >
-              <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between bg-neutral-900/50 backdrop-blur-md">
-                <div className="font-medium truncate text-white">{viewingFile.name}</div>
-                <div className="flex items-center space-x-2">
-                  <button 
-                    onClick={() => {
-                      navigator.clipboard.writeText(viewingFile.url);
-                      setToastMessage('Link copied to clipboard');
-                      setTimeout(() => setToastMessage(null), 3000);
-                    }}
-                    className="px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded-md transition-colors flex items-center space-x-2"
-                  >
-                    <Copy className="w-4 h-4" />
-                    <span>Copy Link</span>
-                  </button>
-                  <a 
-                    href={viewingFile.url} 
-                    download={viewingFile.name}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded-md transition-colors flex items-center space-x-2"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                    <span>Download</span>
-                  </a>
+              <button
+                aria-label="Close preview"
+                onClick={() => setViewingFile(null)}
+                className="absolute top-4 right-4 z-10 p-2 bg-neutral-800/80 hover:bg-neutral-700/80 backdrop-blur rounded-full text-white transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+              
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                transition={{ type: "spring", damping: 25, stiffness: 300 }}
+                className="relative w-full max-w-5xl h-full max-h-[90vh] bg-neutral-900 rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between bg-neutral-900/50 backdrop-blur-md">
+                  <div className="font-medium truncate text-white">{viewingFile.name}</div>
+                  <div className="flex items-center space-x-2">
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(viewingFile.url);
+                        setToastMessage('Link copied to clipboard');
+                        setTimeout(() => setToastMessage(null), 3000);
+                      }}
+                      className="px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded-md transition-colors flex items-center space-x-2"
+                    >
+                      <Copy className="w-4 h-4" />
+                      <span>Copy Link</span>
+                    </button>
+                    <a 
+                      href={viewingFile.downloadUrl || `/api/proxy-download?url=${encodeURIComponent(viewingFile.url)}&filename=${encodeURIComponent(viewingFile.name)}${localStorage.getItem('sessionId') ? `&sessionId=${localStorage.getItem('sessionId')}` : ''}`} 
+                      download={viewingFile.name}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded-md transition-colors flex items-center space-x-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                      <span>Download</span>
+                    </a>
+                  </div>
                 </div>
-              </div>
-              <div className="flex-1 overflow-hidden bg-neutral-950 flex items-center justify-center p-4 relative">
-                {isPreviewLoading && viewingFile.type !== 'application/pdf' && !viewingFile.type?.startsWith('image/') && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-neutral-950 z-10">
-                    <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
-                  </div>
-                )}
-                {isPreviewLoading && (viewingFile.type === 'application/pdf' || viewingFile.type?.startsWith('image/')) && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-neutral-950 z-10 pointer-events-none">
-                    <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
-                  </div>
-                )}
-                {viewingFile.type?.startsWith('image/') ? (
-                  <img onLoad={() => setIsPreviewLoading(false)} src={viewingFile.url} alt={viewingFile.name} className="max-w-full max-h-full object-contain rounded" />
-                ) : viewingFile.type === 'application/pdf' ? (
-                  <iframe onLoad={() => setIsPreviewLoading(false)} src={viewingFile.url} className="w-full h-full rounded border-0 bg-white" title={viewingFile.name} />
-                ) : viewingFile.type?.startsWith('video/') ? (
-                  <video onCanPlay={() => setIsPreviewLoading(false)} src={viewingFile.url} controls className="max-w-full max-h-full" />
-                ) : viewingFile.type?.startsWith('audio/') ? (
-                  <audio onCanPlay={() => setIsPreviewLoading(false)} src={viewingFile.url} controls className="w-full max-w-md" />
-                ) : (
-                  <div className="text-center text-neutral-400" onLoad={() => setIsPreviewLoading(false)}>
-                    <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <p>No preview available for this file type.</p>
-                    <p className="text-xs mt-2 opacity-70">{viewingFile.type}</p>
-                  </div>
-                )}
-              </div>
+                <div className="flex-1 overflow-hidden bg-neutral-950 flex items-center justify-center p-4 relative">
+                  {isPreviewLoading && viewingFile.type !== 'application/pdf' && !viewingFile.type?.startsWith('image/') && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-neutral-950 z-10">
+                      <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
+                    </div>
+                  )}
+                  {isPreviewLoading && (viewingFile.type === 'application/pdf' || viewingFile.type?.startsWith('image/')) && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-neutral-950 z-10 pointer-events-none">
+                      <Loader2 className="w-8 h-8 text-white animate-spin opacity-50" />
+                    </div>
+                  )}
+                  {viewingFile.type?.startsWith('image/') ? (
+                    <img onLoad={() => setIsPreviewLoading(false)} src={viewingFile.url} alt={viewingFile.name} className="max-w-full max-h-full object-contain rounded" />
+                  ) : viewingFile.type === 'application/pdf' ? (
+                    <iframe onLoad={() => setIsPreviewLoading(false)} src={`https://docs.google.com/viewer?url=${encodeURIComponent(viewingFile.url)}&embedded=true`} className="w-full h-full rounded border-0 bg-white" title={viewingFile.name} />
+                  ) : viewingFile.type?.startsWith('video/') ? (
+                    <video onCanPlay={() => setIsPreviewLoading(false)} src={viewingFile.url} controls className="max-w-full max-h-full" />
+                  ) : viewingFile.type?.startsWith('audio/') ? (
+                    <audio onCanPlay={() => setIsPreviewLoading(false)} src={viewingFile.url} controls className="w-full max-w-md" />
+                  ) : (
+                    <div className="text-center text-neutral-400" onLoad={() => setIsPreviewLoading(false)}>
+                      <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      <p>No preview available for this file type.</p>
+                      <p className="text-xs mt-2 opacity-70">{viewingFile.type}</p>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
             </motion.div>
-          </motion.div>
-        )}
-
-      </AnimatePresence>
-            
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
 
       <AnimatePresence>
         {showClearStorageModal && (

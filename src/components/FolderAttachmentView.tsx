@@ -34,7 +34,7 @@ interface FolderAttachmentViewProps {
   folderName: string;
   folderFiles: string; // JSON string
   isPost?: boolean;
-  onPreviewFile?: (file: { url: string; type?: string; name: string }) => void;
+  onPreviewFile?: (file: { url: string; type?: string; name: string, downloadUrl?: string }) => void;
 }
 
 
@@ -69,7 +69,7 @@ const FileTree: React.FC<{
         style={{ paddingLeft: `${level * 16 + 8}px` }}
         onClick={() => {
           if (onPreviewFile && category !== 'archive') {
-            onPreviewFile({ url: node.file.fileUrl, type: node.file.type, name: node.name });
+            onPreviewFile({ url: node.file.fileUrl, type: node.file.type, name: node.name, downloadUrl: individualDownloadHref });
           }
         }}
       >
@@ -333,7 +333,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                           className="group flex items-center justify-between py-3 px-3 hover:bg-white/5 rounded-lg transition-colors cursor-pointer min-h-[56px]"
                           onClick={() => {
                             if (onPreviewFile && category !== 'archive') {
-                              onPreviewFile({ url: file.fileUrl, type: file.type, name: filename });
+                              onPreviewFile({ url: file.fileUrl, type: file.type, name: filename, downloadUrl: individualDownloadHref });
                             }
                           }}
                         >

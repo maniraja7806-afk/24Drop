@@ -955,6 +955,29 @@ async function startServer() {
     }
   };
 
+  app.get('/api/proxy-download', requireSession, (req: any, res: any) => {
+    const fileUrl = req.query.url as string;
+    const filename = req.query.filename as string || 'download';
+    if (!fileUrl) return res.status(400).json({ error: 'Missing url parameter' });
+
+    if (fileUrl.startsWith('http')) {
+      const client = fileUrl.startsWith('https') ? https : http;
+      client.get(fileUrl, (response: any) => {
+        if (response.statusCode !== 200) {
+          if (!res.headersSent) res.status(response.statusCode).send('Failed to download remote file');
+          return;
+        }
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+        res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
+        response.pipe(res);
+      }).on('error', () => {
+        if (!res.headersSent) res.status(500).send('Failed to download remote file');
+      });
+    } else {
+      res.status(400).json({ error: 'Invalid URL' });
+    }
+  });
+
   app.get('/api/messages/:id/download-file', requireSession, (req: any, res: any) => {
     const filename = req.query.filename;
     const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;

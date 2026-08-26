@@ -61,7 +61,7 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           <div className="flex items-center space-x-2 flex-shrink-0">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
             <DownloadButton 
-              href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
+              href={`/api/proxy-download?url=${encodeURIComponent(fileUrl)}&filename=${encodeURIComponent(name)}${sessionId ? `&sessionId=${sessionId}` : ''}`} 
               download={name} 
               title="Download image"
             />
@@ -87,7 +87,7 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
             <DownloadButton 
-              href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
+              href={`/api/proxy-download?url=${encodeURIComponent(fileUrl)}&filename=${encodeURIComponent(name)}${sessionId ? `&sessionId=${sessionId}` : ''}`} 
               download={name} 
               title="Download video"
             />
@@ -108,7 +108,7 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
             {fileSize ? <span className="text-neutral-400 text-[11px]">{formatBytes(fileSize)}</span> : null}
             <DownloadButton 
-              href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
+              href={`/api/proxy-download?url=${encodeURIComponent(fileUrl)}&filename=${encodeURIComponent(name)}${sessionId ? `&sessionId=${sessionId}` : ''}`} 
               download={name} 
               title="Download audio"
             />
@@ -163,7 +163,7 @@ export const FileAttachmentView: React.FC<FileAttachmentViewProps> = ({
           </button>
         )}
         <DownloadButton 
-          href={fileUrl + (fileUrl.includes('?') ? '&' : '?') + (sessionId ? `sessionId=${sessionId}` : '')} 
+          href={`/api/proxy-download?url=${encodeURIComponent(fileUrl)}&filename=${encodeURIComponent(name)}${sessionId ? `&sessionId=${sessionId}` : ''}`} 
           download={name} 
           title="Download file"
           iconClass="w-4 h-4"
