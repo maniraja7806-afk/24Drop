@@ -64,8 +64,7 @@ async function startServer() {
       isPinned BOOLEAN DEFAULT 0,
       isEdited BOOLEAN DEFAULT 0,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL,
-      FOREIGN KEY(sessionId) REFERENCES sessions(id) ON DELETE CASCADE
+      expiresAt DATETIME NOT NULL
     );
     CREATE TABLE IF NOT EXISTS pinned_posts (
       id TEXT PRIMARY KEY,
@@ -91,8 +90,7 @@ async function startServer() {
       isEdited BOOLEAN DEFAULT 0,
       seenAt DATETIME,
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL,
-      FOREIGN KEY(senderId) REFERENCES sessions(id) ON DELETE CASCADE
+      expiresAt DATETIME NOT NULL
     );
     CREATE TABLE IF NOT EXISTS pinned_messages (
       id TEXT PRIMARY KEY,
