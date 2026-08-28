@@ -36,6 +36,13 @@ async function startServer() {
     res.json({ status: 'ok' });
   });
 
+  app.get('/api/server-time', (req, res) => {
+    res.json({ 
+      serverTime: new Date().toISOString(),
+      serverTimeMs: Date.now()
+    });
+  });
+
   // Set up Database
   const dbPath = path.join(process.cwd(), 'database.db');
   const db = new Database(dbPath);
@@ -596,6 +603,7 @@ async function startServer() {
 
     const postId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    console.log(`[Diagnostic] Public Post Created | ID: ${postId} | Now: ${new Date().toISOString()} | Expires: ${expiresAt}`);
     
     let fileUrl = bodyFileUrl || (file ? `/uploads/${file.filename}` : (driveFileUrl || null));
     
@@ -789,6 +797,7 @@ async function startServer() {
 
     const msgId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    console.log(`[Diagnostic] Private Message Created | ID: ${msgId} | Now: ${new Date().toISOString()} | Expires: ${expiresAt}`);
     
     let fileUrl = bodyFileUrl || (file ? `/uploads/${file.filename}` : (driveFileUrl || null));
     
@@ -1193,6 +1202,41 @@ async function startServer() {
         io.to(data.to).emit('messages_seen', { by: data.from, seenAt: nowIso });
       } catch(e) {}
     });
+  });
+
+  // --- Diagnostic Expiration Route ---
+  app.get('/api/diagnostics/expiration', (req: any, res: any) => {
+    try {
+      const now = new Date().toISOString();
+      const nextHour = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      
+      const posts = db.prepare('SELECT id, createdAt, expiresAt FROM posts ORDER BY createdAt DESC LIMIT 5').all();
+      const messages = db.prepare('SELECT id, createdAt, expiresAt FROM messages ORDER BY createdAt DESC LIMIT 5').all();
+      const sessions = db.prepare('SELECT id, expiresAt FROM sessions ORDER BY expiresAt DESC LIMIT 5').all();
+      
+      const soonExpiringPosts = db.prepare('SELECT COUNT(*) as count FROM posts WHERE expiresAt < ?').get(nextHour);
+      const soonExpiringMessages = db.prepare('SELECT COUNT(*) as count FROM messages WHERE expiresAt < ?').get(nextHour);
+
+      res.json({
+        serverTime: now,
+        timestampMathCheck: {
+          nowMs: Date.now(),
+          plus24hMs: Date.now() + (24 * 60 * 60 * 1000),
+          calculated24hISO: new Date(Date.now() + (24 * 60 * 60 * 1000)).toISOString()
+        },
+        expiringWithinOneHour: {
+          posts: (soonExpiringPosts as any).count,
+          messages: (soonExpiringMessages as any).count
+        },
+        latestRecords: {
+          posts,
+          messages,
+          sessions
+        }
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // --- Background Cleanup ---
