@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Play, Pause } from 'lucide-react';
+import { toast } from 'sonner';
 
 export function AudioPlayer({ src }: { src: string }) {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -83,7 +84,10 @@ export function AudioPlayer({ src }: { src: string }) {
       if (isPlaying) {
         audioRef.current.pause();
       } else {
-        audioRef.current.play();
+        audioRef.current.play().catch(e => {
+          console.error("Playback failed:", e);
+          toast.error("Failed to play audio. The format may be unsupported.");
+        });
       }
     }
   };

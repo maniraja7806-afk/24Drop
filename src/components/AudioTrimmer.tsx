@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, Check, X } from 'lucide-react';
+import { toast } from 'sonner';
 
 function encodeWAV(samples: Float32Array, sampleRate: number) {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
@@ -58,13 +59,21 @@ export function AudioTrimmer({
   useEffect(() => {
     let active = true;
     const loadAudio = async () => {
-      const arrayBuffer = await blob.arrayBuffer();
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioContextRef.current = ctx;
-      const buffer = await ctx.decodeAudioData(arrayBuffer);
-      if (active) {
-        setAudioBuffer(buffer);
-        drawWaveform(buffer);
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioContextRef.current = ctx;
+        const buffer = await ctx.decodeAudioData(arrayBuffer);
+        if (active) {
+          setAudioBuffer(buffer);
+          drawWaveform(buffer);
+        }
+      } catch (err: any) {
+        console.error("Failed to decode audio data in trimmer:", err);
+        toast.error("Failed to decode audio data. The file may be corrupted or unsupported.");
+        if (active) {
+          onCancel();
+        }
       }
     };
     loadAudio();

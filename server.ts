@@ -1,7 +1,8 @@
 import express from 'express';
 import { createServer as createHttpServer } from 'http';
 import { Server } from 'socket.io';
-import Database from 'better-sqlite3';
+import connectToDatabase from './src/db/mongodb';
+import { Session, Post, Message, MessageReaction, PostReaction, PinnedPost, PinnedMessage, Setting } from './src/db/mongoModels';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
@@ -32,6 +33,17 @@ async function startServer() {
   app.use(express.json({ limit: '5gb' }));
   app.use(express.urlencoded({ limit: '5gb', extended: true }));
 
+  app.use('/api', async (req, res, next) => {
+    if (req.path === '/health' || req.path === '/server-time') return next();
+    try {
+      await connectToDatabase();
+      next();
+    } catch (err) {
+      console.error('Database connection error:', err);
+      res.status(503).json({ error: 'Database unavailable' });
+    }
+  });
+
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
   });
@@ -44,146 +56,21 @@ async function startServer() {
   });
 
   // Set up Database
-  const dbPath = path.join(process.cwd(), 'database.db');
-  const db = new Database(dbPath);
-  db.pragma('foreign_keys = ON');
+  try {
+    await connectToDatabase();
+    console.log('Connected to MongoDB Atlas');
+  } catch (err) {
+    console.error('Failed to connect to MongoDB Atlas at startup:', err);
+  }
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      color TEXT NOT NULL,
-      avatar TEXT NOT NULL,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS posts (
-      id TEXT PRIMARY KEY,
-      sessionId TEXT NOT NULL,
-      username TEXT NOT NULL,
-      color TEXT NOT NULL,
-      avatar TEXT NOT NULL,
-      content TEXT,
-      parentId TEXT,
-      fileUrl TEXT,
-      fileName TEXT,
-      fileType TEXT,
-      isPinned BOOLEAN DEFAULT 0,
-      isEdited BOOLEAN DEFAULT 0,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS pinned_posts (
-      id TEXT PRIMARY KEY,
-      postId TEXT NOT NULL,
-      pinnedByUserId TEXT NOT NULL,
-      pinnedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(postId) REFERENCES posts(id) ON DELETE CASCADE,
-      UNIQUE(postId, pinnedByUserId)
-    );
-    CREATE INDEX IF NOT EXISTS idx_pinned_posts_postId ON pinned_posts(postId);
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      senderId TEXT NOT NULL,
-      senderUsername TEXT NOT NULL,
-      receiverUsername TEXT NOT NULL,
-      content TEXT,
-      parentId TEXT,
-      fileUrl TEXT,
-      fileName TEXT,
-      fileType TEXT,
-      status TEXT DEFAULT 'sent',
-      isPinned BOOLEAN DEFAULT 0,
-      isEdited BOOLEAN DEFAULT 0,
-      seenAt DATETIME,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS pinned_messages (
-      id TEXT PRIMARY KEY,
-      messageId TEXT NOT NULL,
-      pinnedByUserId TEXT NOT NULL,
-      pinnedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE,
-      UNIQUE(messageId, pinnedByUserId)
-    );
-    CREATE INDEX IF NOT EXISTS idx_pinned_messages_messageId ON pinned_messages(messageId);
-    CREATE TABLE IF NOT EXISTS message_reactions (
-      id TEXT PRIMARY KEY,
-      messageId TEXT NOT NULL,
-      username TEXT NOT NULL,
-      emoji TEXT NOT NULL,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL,
-      FOREIGN KEY(messageId) REFERENCES messages(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS post_reactions (
-      id TEXT PRIMARY KEY,
-      postId TEXT NOT NULL,
-      username TEXT NOT NULL,
-      emoji TEXT NOT NULL,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-      expiresAt DATETIME NOT NULL,
-      FOREIGN KEY(postId) REFERENCES posts(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    );
-  `);
-  
-  const getSetting = (key: string) => {
-    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as any;
-    return row ? row.value : null;
+  const getSetting = async (key: string) => {
+    const doc = await Setting.findOne({ key });
+    return doc ? doc.value : null;
   };
   
-  const setSetting = (key: string, value: string) => {
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+  const setSetting = async (key: string, value: string) => {
+    await Setting.findOneAndUpdate({ key }, { value }, { upsert: true });
   };
-  
-  // Migration for existing databases
-  try {
-    db.prepare('ALTER TABLE messages ADD COLUMN isPinned BOOLEAN DEFAULT 0').run();
-  } catch (e) {
-    // Column might already exist
-  }
-
-  try {
-    db.prepare('ALTER TABLE posts ADD COLUMN isPinned BOOLEAN DEFAULT 0').run();
-  } catch (e) {
-    // Column might already exist
-  }
-
-  try {
-    db.prepare('ALTER TABLE posts ADD COLUMN isEdited BOOLEAN DEFAULT 0').run();
-  } catch (e) {
-    // Column might already exist
-  }
-
-  try {
-    db.exec("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'sent'");
-  } catch(e) {}
-  
-  try {
-    db.exec("ALTER TABLE messages ADD COLUMN seenAt DATETIME");
-  } catch(e) {}
-
-  try {
-    db.exec("ALTER TABLE messages ADD COLUMN isEdited BOOLEAN DEFAULT 0");
-  } catch(e) {}
-
-  try {
-    db.exec("ALTER TABLE posts ADD COLUMN fileSize INTEGER");
-  } catch(e) {}
-
-  try {
-    db.exec("ALTER TABLE messages ADD COLUMN fileSize INTEGER");
-  } catch(e) {}
-
-  try { db.exec("ALTER TABLE messages ADD COLUMN folderName TEXT"); } catch(e) {}
-  try { db.exec("ALTER TABLE messages ADD COLUMN folderFiles TEXT"); } catch(e) {}
-  try { db.exec("ALTER TABLE posts ADD COLUMN folderName TEXT"); } catch(e) {}
-  try { db.exec("ALTER TABLE posts ADD COLUMN folderFiles TEXT"); } catch(e) {}
 
   // Ensure uploads directory exists
   const uploadDir = path.join(process.cwd(), 'uploads');
@@ -205,11 +92,11 @@ async function startServer() {
   // --- API Routes ---
 
   // Generate 3 random usernames
-  app.get('/api/usernames/generate', (req, res) => {
+  app.get('/api/usernames/generate', async (req, res) => {
     const adjectives = ['Blue', 'Nova', 'Pixel', 'Neon', 'Cyber', 'Quantum', 'Cosmic', 'Solar', 'Echo', 'Ghost'];
     const nouns = ['Falcon', 'Tiger', 'Wolf', 'Dragon', 'Phantom', 'Sphinx', 'Pulse', 'Viper', 'Rider', 'Nomad'];
     
-    const generateName = () => {
+    const generateName = async () => {
       let name;
       let isUnique = false;
       let attempts = 0;
@@ -218,7 +105,7 @@ async function startServer() {
         const noun = nouns[Math.floor(Math.random() * nouns.length)];
         const num = Math.floor(Math.random() * 99) + 1;
         name = `${adj}${noun}${num}`;
-        const existing = db.prepare('SELECT id FROM sessions WHERE username = ?').get(name);
+        const existing = await Session.findOne({ username: name });
         if (!existing) isUnique = true;
         attempts++;
       }
@@ -227,7 +114,7 @@ async function startServer() {
 
     const usernames: string[] = [];
     while (usernames.length < 3) {
-      const name = generateName();
+      const name = await generateName();
       if (name && !usernames.includes(name)) {
         usernames.push(name);
       }
@@ -236,15 +123,14 @@ async function startServer() {
   });
 
   // Claim a username and create a 24-hour session
-  app.post('/api/usernames/claim', (req, res) => {
+  app.post('/api/usernames/claim', async (req, res) => {
     const { username } = req.body;
     if (!username) return res.status(400).json({ error: 'Username required' });
 
-    const checkStmt = db.prepare('SELECT * FROM sessions WHERE username = ?');
-    const existing = checkStmt.get(username) as any;
+    const existing = await Session.findOne({ username });
     if (existing) {
       return res.json({ 
-        sessionId: existing.id, 
+        sessionId: existing._id, 
         username: existing.username, 
         color: existing.color, 
         avatar: existing.avatar, 
@@ -259,29 +145,29 @@ async function startServer() {
     const color = colors[Math.floor(Math.random() * colors.length)];
     const avatar = avatars[Math.floor(Math.random() * avatars.length)];
     
-    // Exactly 24 hours from now
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-    const insertStmt = db.prepare('INSERT INTO sessions (id, username, color, avatar, expiresAt) VALUES (?, ?, ?, ?, ?)');
-    insertStmt.run(sessionId, username, color, avatar, expiresAt);
+    const session = new Session({
+      _id: sessionId,
+      username, color, avatar, expiresAt
+    });
+    await session.save();
 
     res.json({ sessionId, username, color, avatar, expiresAt });
   });
 
   // Session middleware
-  const requireSession = (req: any, res: any, next: any) => {
+  const requireSession = async (req: any, res: any, next: any) => {
     const sessionId = req.headers['x-session-id'] || req.query.sessionId;
     if (!sessionId) return res.status(401).json({ error: 'Missing session' });
     
-    const stmt = db.prepare('SELECT * FROM sessions WHERE id = ?');
-    const session = stmt.get(sessionId);
-    if (!session) return res.status(401).json({ error: 'Invalid or expired session' });
+    const session = await Session.findById(sessionId);
+    if (!session || new Date(session.expiresAt) <= new Date()) return res.status(401).json({ error: 'Invalid or expired session' });
     
-    req.session = session;
+    req.session = Object.assign(session.toObject(), { id: session._id });
     next();
   };
 
-  // Get current session info
   app.get('/api/session', requireSession, (req: any, res: any) => {
     res.json(req.session);
   });
@@ -307,7 +193,7 @@ async function startServer() {
     return 'others';
   }
 
-  function calculateStorageUsage() {
+  async function calculateStorageUsage() {
     const limitBytes = 25 * 1024 * 1024 * 1024; // 25GB
     let usageBytes = 0;
     const categories = {
@@ -340,13 +226,12 @@ async function startServer() {
       } catch (e) {}
     }
 
-    // Check DB for any remote / external / Cloudinary files where fileSize > 0
     try {
-      const posts = db.prepare('SELECT fileSize, fileUrl, fileName, fileType FROM posts WHERE fileSize > 0 AND fileUrl IS NOT NULL').all() as any[];
+      const posts = await Post.find({ fileSize: { $gt: 0 }, fileUrl: { $ne: null } });
       for (const p of posts) {
         if (p.fileUrl && p.fileUrl.startsWith('/uploads/')) {
           const fn = p.fileUrl.replace('/uploads/', '');
-          if (diskFiles.has(fn)) continue; // Already counted from disk
+          if (diskFiles.has(fn)) continue;
         }
         const size = Number(p.fileSize || 0);
         usageBytes += size;
@@ -354,11 +239,11 @@ async function startServer() {
         categories[cat] += size;
       }
 
-      const msgs = db.prepare('SELECT fileSize, fileUrl, fileName, fileType FROM messages WHERE fileSize > 0 AND fileUrl IS NOT NULL').all() as any[];
+      const msgs = await Message.find({ fileSize: { $gt: 0 }, fileUrl: { $ne: null } });
       for (const m of msgs) {
         if (m.fileUrl && m.fileUrl.startsWith('/uploads/')) {
           const fn = m.fileUrl.replace('/uploads/', '');
-          if (diskFiles.has(fn)) continue; // Already counted from disk
+          if (diskFiles.has(fn)) continue;
         }
         const size = Number(m.fileSize || 0);
         usageBytes += size;
@@ -370,15 +255,15 @@ async function startServer() {
     return { usageBytes, limitBytes, categories };
   }
 
-  function broadcastStorageUpdate() {
-    const usage = calculateStorageUsage();
+  async function broadcastStorageUpdate() {
+    const usage = await calculateStorageUsage();
     io.emit('storage_updated', usage);
   }
 
   // Storage usage
   app.get('/api/storage/usage', requireSession, async (req: any, res: any) => {
     try {
-      res.json(calculateStorageUsage());
+      res.json(await calculateStorageUsage());
     } catch (err) {
       console.error('Failed to calculate storage usage:', err);
       res.status(500).json({ error: 'Failed to fetch storage usage' });
@@ -411,11 +296,14 @@ async function startServer() {
         }
       }
 
-      db.prepare('DELETE FROM posts').run();
-      db.prepare('DELETE FROM messages').run();
-      db.prepare('DELETE FROM message_reactions').run();
+      await Post.deleteMany({});
+      await Message.deleteMany({});
+      await MessageReaction.deleteMany({});
+      await PostReaction.deleteMany({});
+      await PinnedPost.deleteMany({});
+      await PinnedMessage.deleteMany({});
 
-      setSetting('last_cleared_time', Date.now().toString());
+      await setSetting('last_cleared_time', Date.now().toString());
 
       broadcastStorageUpdate();
 
@@ -427,66 +315,86 @@ async function startServer() {
   });
 
   // Search users
-  app.get('/api/users/search', requireSession, (req: any, res: any) => {
+  app.get('/api/users/search', requireSession, async (req: any, res: any) => {
     const query = req.query.q;
     if (!query) return res.json([]);
-    const stmt = db.prepare("SELECT username, color, avatar, expiresAt FROM sessions WHERE username LIKE ? COLLATE NOCASE LIMIT 10");
-    const users = stmt.all(`%${query}%`);
+    const users = await Session.find({ expiresAt: { $gt: new Date().toISOString() }, username: { $regex: query, $options: 'i' } })
+      .select('username color avatar expiresAt')
+      .limit(10)
+      .lean();
     console.log('Search query:', query, 'Result length:', users.length);
     res.json(users);
   });
 
-  app.get('/api/chats', requireSession, (req: any, res: any) => {
+  app.get('/api/chats', requireSession, async (req: any, res: any) => {
     const session = req.session;
     
     // Get unique partners sorted by the latest message time
-    const partners = db.prepare(`
-      SELECT 
-        CASE 
-          WHEN m.senderUsername = ? THEN m.receiverUsername 
-          ELSE m.senderUsername 
-        END as username,
-        MAX(m.createdAt) as lastMessageAt
-      FROM messages m
-      WHERE m.senderUsername = ? OR m.receiverUsername = ?
-      GROUP BY username
-      ORDER BY lastMessageAt DESC
-      LIMIT 20
-    `).all(session.username, session.username, session.username);
+    const messages = await Message.find({
+      expiresAt: { $gt: new Date().toISOString() },
+      $or: [{ senderUsername: session.username }, { receiverUsername: session.username }]
+    }).sort({ createdAt: -1 }).lean();
+
+    const partnerMap = new Map();
+    for (const m of messages) {
+      const partner = m.senderUsername === session.username ? m.receiverUsername : m.senderUsername;
+      if (!partnerMap.has(partner)) {
+        partnerMap.set(partner, m.createdAt);
+      }
+      if (partnerMap.size >= 20) break;
+    }
+
+    const partners = Array.from(partnerMap.entries()).map(([username, lastMessageAt]) => ({
+      username,
+      lastMessageAt
+    }));
     
-    // We can also fetch the color and avatar for these users
-    const usernames = partners.map((p: any) => p.username);
-    if (usernames.length === 0) {
+    if (partners.length === 0) {
       return res.json([]);
     }
     
-    const placeholders = usernames.map(() => '?').join(',');
-    const usersInfo = db.prepare(`SELECT username, color, avatar FROM sessions WHERE username IN (${placeholders})`).all(...usernames);
+    const usernames = partners.map(p => p.username);
+    const usersInfo = await Session.find({ username: { $in: usernames } }).select('username color avatar').lean();
     
-    const enrichedPartners = partners.map((p: any) => {
-      const info = usersInfo.find((u: any) => u.username === p.username);
+    const enrichedPartners = partners.map(p => {
+      const info = usersInfo.find(u => u.username === p.username);
       return {
         ...p,
-        color: info ? (info as any).color : 'bg-neutral-500',
-        avatar: info ? (info as any).avatar : '👤'
+        color: info ? info.color : 'bg-neutral-500',
+        avatar: info ? info.avatar : '👤'
       };
     });
     
     res.json(enrichedPartners);
   });
 
-  app.get('/api/search', requireSession, (req: any, res: any) => {
+  app.get('/api/search', requireSession, async (req: any, res: any) => {
     const query = req.query.q;
     const session = req.session;
     if (!query) return res.json({ posts: [], messages: [] });
     
-    const posts = db.prepare("SELECT * FROM posts WHERE content LIKE ? COLLATE NOCASE OR fileName LIKE ? COLLATE NOCASE LIMIT 20").all(`%${query}%`, `%${query}%`);
-    const messages = db.prepare("SELECT * FROM messages WHERE (senderUsername = ? OR receiverUsername = ?) AND (content LIKE ? COLLATE NOCASE OR fileName LIKE ? COLLATE NOCASE) LIMIT 20").all(session.username, session.username, `%${query}%`, `%${query}%`);
+    const posts = await Post.find({
+      expiresAt: { $gt: new Date().toISOString() },
+      $or: [
+        { content: { $regex: query, $options: 'i' } },
+        { fileName: { $regex: query, $options: 'i' } }
+      ]
+    }).limit(20).lean();
+
+    const messages = await Message.find({
+      expiresAt: { $gt: new Date().toISOString() },
+      $and: [
+        { $or: [{ senderUsername: session.username }, { receiverUsername: session.username }] },
+        { $or: [
+          { content: { $regex: query, $options: 'i' } },
+          { fileName: { $regex: query, $options: 'i' } }
+        ]}
+      ]
+    }).limit(20).lean();
     
-    res.json({ posts, messages });
+    res.json({ posts: posts.map(p => ({ ...p, id: p._id })), messages: messages.map(m => ({ ...m, id: m._id })) });
   });
 
-  // Draft Upload Endpoint (immediate background upload)
   app.post('/api/upload/draft', requireSession, upload.single('file'), async (req: any, res: any) => {
     const file = req.file;
     if (!file) {
@@ -528,47 +436,39 @@ async function startServer() {
   });
 
   // Get Posts
-  app.get('/api/posts', requireSession, (req: any, res: any) => {
-    const stmt = db.prepare(`
-      SELECT p.*, 
-        (SELECT json_group_array(json_object('id', r.id, 'username', r.username, 'emoji', r.emoji)) 
-         FROM post_reactions r WHERE r.postId = p.id) as reactionsJson
-      FROM posts p
-      ORDER BY p.createdAt ASC LIMIT 100
-    `);
-    const posts = stmt.all().map((post: any) => {
-      let reactions = [];
-      if (post.reactionsJson && post.reactionsJson !== '[{}]') {
-        try {
-          reactions = JSON.parse(post.reactionsJson);
-          if (reactions.length === 1 && !reactions[0].id) {
-            reactions = [];
-          }
-        } catch(e) {}
-      }
-      delete post.reactionsJson;
-      return { ...post, reactions };
+  app.get('/api/posts', requireSession, async (req: any, res: any) => {
+    const posts = await Post.find({ expiresAt: { $gt: new Date().toISOString() } }).sort({ createdAt: 1 }).limit(100).lean();
+    
+    // Fetch reactions for these posts
+    const postIds = posts.map(p => p._id);
+    const allReactions = await PostReaction.find({ postId: { $in: postIds } }).lean();
+    
+    const enrichedPosts = posts.map(post => {
+      const reactions = allReactions
+        .filter(r => r.postId === post._id)
+        .map(r => ({ id: r._id, username: r.username, emoji: r.emoji }));
+      return { ...post, id: post._id, reactions };
     });
-    res.json(posts);
+
+    res.json(enrichedPosts);
   });
 
-  // React to Post
-  app.post('/api/posts/:id/react', requireSession, (req: any, res: any) => {
+  app.post('/api/posts/:id/react', requireSession, async (req: any, res: any) => {
     const postId = req.params.id;
     const { emoji } = req.body;
     const session = req.session;
 
     if (!emoji) return res.status(400).json({ error: 'Emoji required' });
 
-    const post = db.prepare('SELECT id FROM posts WHERE id = ?').get(postId) as any;
-    if (!post) return res.status(404).json({ error: 'Post not found' });
+    const post = await Post.findById(postId);
+    if (!post || new Date(post.expiresAt) <= new Date()) return res.status(404).json({ error: 'Post not found' });
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-    const existing = db.prepare('SELECT id, emoji FROM post_reactions WHERE postId = ? AND username = ?').get(postId, session.username) as any;
+    const existing = await PostReaction.findOne({ postId, username: session.username });
 
     if (existing) {
-      db.prepare('DELETE FROM post_reactions WHERE id = ?').run(existing.id);
+      await PostReaction.deleteOne({ _id: existing._id });
       io.emit('post_reaction', { postId, username: session.username, emoji: existing.emoji, removed: true });
 
       if (existing.emoji === emoji) {
@@ -577,17 +477,16 @@ async function startServer() {
     }
 
     const reactionId = uuidv4();
-    db.prepare(`
-      INSERT INTO post_reactions (id, postId, username, emoji, expiresAt)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(reactionId, postId, session.username, emoji, expiresAt);
+    const reaction = new PostReaction({
+      _id: reactionId, postId, username: session.username, emoji, expiresAt
+    });
+    await reaction.save();
 
     const newReaction = { id: reactionId, postId, username: session.username, emoji };
     io.emit('post_reaction', newReaction);
     return res.json({ success: true, reaction: newReaction });
   });
 
-  // Create Post
   app.post('/api/posts', requireSession, upload.single('file'), async (req: any, res: any) => {
     const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize, folderName, folderFiles } = req.body;
     const file = req.file;
@@ -603,7 +502,6 @@ async function startServer() {
 
     const postId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    console.log(`[Diagnostic] Public Post Created | ID: ${postId} | Now: ${new Date().toISOString()} | Expires: ${expiresAt}`);
     
     let fileUrl = bodyFileUrl || (file ? `/uploads/${file.filename}` : (driveFileUrl || null));
     
@@ -629,164 +527,165 @@ async function startServer() {
     const fileType = bodyFileType || (file ? file.mimetype : (driveFileType || null));
     const fileSize = bodyFileSize ? Number(bodyFileSize) : (file ? file.size : null);
 
-    const stmt = db.prepare(`
-      INSERT INTO posts (id, sessionId, username, color, avatar, content, parentId, fileUrl, fileName, fileType, fileSize, folderName, folderFiles, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const newPost = new Post({
+      _id: postId, username: session.username, content: content || null, parentId: parentId || null, 
+      fileUrl, fileName, fileType, fileSize, folderName: folderName || null, folderFiles: folderFiles || null, 
+      expiresAt, color: session.color, avatar: session.avatar, sessionId: session.id
+    });
     
-    stmt.run(postId, session.id, session.username, session.color, session.avatar, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, folderName || null, folderFiles || null, expiresAt);
+    await newPost.save();
 
-    const newPost = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
+    const postObj = { ...newPost.toObject(), id: newPost._id };
     
-    // Broadcast via socket
-    io.emit('new_post', newPost);
-    broadcastStorageUpdate();
+    io.emit('new_post', postObj);
+    await broadcastStorageUpdate();
     
-    res.json(newPost);
+    res.json(postObj);
   });
 
   // Delete Post
-  app.delete('/api/posts/:id', requireSession, (req: any, res: any) => {
+  app.delete('/api/posts/:id', requireSession, async (req: any, res: any) => {
     const postId = req.params.id;
     const session = req.session;
 
-    const stmt = db.prepare('SELECT * FROM posts WHERE id = ?');
-    const post: any = stmt.get(postId);
+    const post = await Post.findById(postId);
+    if (!post || new Date(post.expiresAt) <= new Date()) return res.status(404).json({ error: 'Not found' });
+    if (post.sessionId !== session.id && post.username !== session.username) return res.status(403).json({ error: 'Unauthorized' });
 
-    if (!post) return res.status(404).json({ error: 'Not found' });
-    if (post.sessionId !== session.id) return res.status(403).json({ error: 'Unauthorized' });
-
-    // Optional: Delete file from fs
     if (post.fileUrl) {
-      const filename = post.fileUrl.replace('/uploads/', '');
-      const filepath = path.join(uploadDir, filename);
-      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      if (post.fileUrl.startsWith('/uploads/')) {
+        const filename = post.fileUrl.replace('/uploads/', '');
+        const filepath = path.join(uploadDir, filename);
+        if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      } else if (post.fileUrl.includes('cloudinary.com') && process.env.CLOUDINARY_CLOUD_NAME) {
+         try {
+           const urlParts = post.fileUrl.split('/');
+           const filenameWithExt = urlParts[urlParts.length - 1];
+           const publicId = filenameWithExt.split('.')[0];
+           cloudinary.uploader.destroy(publicId).catch(() => {});
+         } catch(e) {}
+      }
     }
 
-    const delStmt = db.prepare('DELETE FROM posts WHERE id = ?');
-    delStmt.run(postId);
-    db.prepare('DELETE FROM post_reactions WHERE postId = ?').run(postId);
+    await Post.deleteOne({ _id: postId });
+    await PostReaction.deleteMany({ postId });
+    await PinnedPost.deleteMany({ postId });
 
     io.emit('delete_post', postId);
-    broadcastStorageUpdate();
+    await broadcastStorageUpdate();
     res.json({ success: true });
   });
 
-  // Edit Post
-  app.put('/api/posts/:id', requireSession, (req: any, res: any) => {
+    // Edit Post
+  app.put('/api/posts/:id', requireSession, async (req: any, res: any) => {
     const postId = req.params.id;
     const session = req.session;
     const { content } = req.body;
 
-    const stmt = db.prepare('SELECT * FROM posts WHERE id = ?');
-    const post: any = stmt.get(postId);
+    const post = await Post.findById(postId);
+    if (!post || new Date(post.expiresAt) <= new Date()) return res.status(404).json({ error: 'Not found' });
+    if (post.sessionId !== session.id && post.username !== session.username) return res.status(403).json({ error: 'Unauthorized' });
 
-    if (!post) return res.status(404).json({ error: 'Not found' });
-    if (post.sessionId !== session.id) return res.status(403).json({ error: 'Unauthorized' });
+    post.content = content;
+    post.isEdited = true;
+    await post.save();
 
-    db.prepare('UPDATE posts SET content = ?, isEdited = 1 WHERE id = ?').run(content, postId);
     io.emit('edit_post', { postId, content });
     res.json({ success: true, content });
   });
 
-  // Toggle Pin Post
-  app.post('/api/posts/:id/pin', requireSession, (req: any, res: any) => {
+    // Toggle Pin Post
+  app.post('/api/posts/:id/pin', requireSession, async (req: any, res: any) => {
     const postId = req.params.id;
     const session = req.session;
 
-    const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId) as any;
-    if (!post) return res.status(404).json({ error: 'Post not found' });
+    const post = await Post.findById(postId);
+    if (!post || new Date(post.expiresAt) <= new Date()) return res.status(404).json({ error: 'Post not found' });
     
-    const newPinned = post.isPinned ? 0 : 1;
-    
-    const togglePinTransaction = db.transaction(() => {
-      db.prepare('UPDATE posts SET isPinned = ? WHERE id = ?').run(newPinned, postId);
-      
-      let replacedId = null;
-      if (newPinned) {
-        db.prepare('INSERT OR IGNORE INTO pinned_posts (id, postId, pinnedByUserId) VALUES (?, ?, ?)').run(uuidv4(), postId, session.id);
-        
-        const pins = db.prepare('SELECT id, postId FROM pinned_posts ORDER BY pinnedAt ASC').all() as any[];
-        if (pins.length > 10) {
-           const oldest = pins[0];
-           db.prepare('DELETE FROM pinned_posts WHERE id = ?').run(oldest.id);
-           db.prepare('UPDATE posts SET isPinned = 0 WHERE id = ?').run(oldest.postId);
-           replacedId = oldest.postId;
-        }
-      } else {
-        db.prepare('DELETE FROM pinned_posts WHERE postId = ?').run(postId);
-      }
-      return replacedId;
-    });
-    
-    const replacedId = togglePinTransaction();
+    const newPinned = post.isPinned ? false : true;
+    let replacedId = null;
 
-    io.emit('post_pinned', { postId, isPinned: newPinned });
+    if (newPinned) {
+      post.isPinned = true;
+      await post.save();
+      
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const existingPin = await PinnedPost.findOne({ postId, pinnedByUserId: session.id });
+      if (!existingPin) {
+        const pin = new PinnedPost({
+          _id: uuidv4(), postId, pinnedByUserId: session.id, expiresAt
+        });
+        await pin.save();
+      }
+
+      const pins = await PinnedPost.find().sort({ pinnedAt: 1 }).lean();
+      if (pins.length > 10) {
+         const oldest = pins[0];
+         await PinnedPost.deleteOne({ _id: oldest._id });
+         await Post.updateOne({ _id: oldest.postId }, { $set: { isPinned: false } });
+         replacedId = oldest.postId;
+      }
+    } else {
+      post.isPinned = false;
+      await post.save();
+      await PinnedPost.deleteMany({ postId });
+    }
+    
+    io.emit('post_pinned', { postId, isPinned: newPinned ? 1 : 0 });
     if (replacedId) {
         io.emit('post_pinned', { postId: replacedId, isPinned: 0, replaced: true });
     }
 
-    return res.json({ success: true, isPinned: newPinned, replacedId });
+    return res.json({ success: true, isPinned: newPinned ? 1 : 0, replacedId });
   });
 
-  // Get Messages
-  app.get('/api/messages/:username', requireSession, (req: any, res: any) => {
+    // Get Messages
+  app.get('/api/messages/:username', requireSession, async (req: any, res: any) => {
     const otherUsername = req.params.username;
     const myUsername = req.session.username;
 
     const nowIso = new Date().toISOString();
-    // Mark as seen
-    db.prepare(`
-      UPDATE messages SET status = 'seen', seenAt = ? 
-      WHERE senderUsername = ? AND receiverUsername = ? AND status != 'seen'
-    `).run(nowIso, otherUsername, myUsername);
+    
+    await Message.updateMany(
+      { senderUsername: otherUsername, receiverUsername: myUsername, status: { $ne: 'seen' } },
+      { $set: { status: 'seen', seenAt: nowIso } }
+    );
 
     io.to(otherUsername).emit('messages_seen', { by: myUsername, seenAt: nowIso });
 
-    const stmt = db.prepare(`
-      SELECT m.*, 
-        (SELECT json_group_array(json_object('id', r.id, 'username', r.username, 'emoji', r.emoji)) 
-         FROM message_reactions r WHERE r.messageId = m.id) as reactionsJson
-      FROM messages m
-      WHERE (m.senderUsername = ? AND m.receiverUsername = ?)
-         OR (m.senderUsername = ? AND m.receiverUsername = ?)
-      ORDER BY m.createdAt ASC
-    `);
+    const messages = await Message.find({
+      expiresAt: { $gt: new Date().toISOString() },
+      $or: [
+        { senderUsername: myUsername, receiverUsername: otherUsername },
+        { senderUsername: otherUsername, receiverUsername: myUsername }
+      ]
+    }).sort({ createdAt: 1 }).limit(100).lean();
     
-    const messages = stmt.all(myUsername, otherUsername, otherUsername, myUsername).map((msg: any) => {
-      let reactions = [];
-      if (msg.reactionsJson && msg.reactionsJson !== '[{}]') { // SQLite json_group_array can return '[{}]' if empty depending on query, but here it might return '[]'
-        try {
-          reactions = JSON.parse(msg.reactionsJson);
-          if (reactions.length === 1 && !reactions[0].id) {
-            reactions = [];
-          }
-        } catch(e) {}
-      }
-      delete msg.reactionsJson;
-      return { ...msg, reactions };
+    const messageIds = messages.map(m => m._id);
+    const allReactions = await MessageReaction.find({ messageId: { $in: messageIds } }).lean();
+
+    const enrichedMessages = messages.map(msg => {
+      const reactions = allReactions
+        .filter(r => r.messageId === msg._id)
+        .map(r => ({ id: r._id, username: r.username, emoji: r.emoji }));
+      return { ...msg, id: msg._id, reactions };
     });
-    res.json(messages);
+    
+    res.json(enrichedMessages);
   });
 
-  // Send Message
+    // Send Message
   app.post('/api/messages/:username', requireSession, upload.single('file'), async (req: any, res: any) => {
     const receiverUsername = req.params.username;
     const { content, parentId, fileUrl: bodyFileUrl, fileName: bodyFileName, fileType: bodyFileType, fileSize: bodyFileSize, folderName, folderFiles } = req.body;
     const file = req.file;
     const session = req.session;
 
-    const partners = db.prepare(`
-      SELECT DISTINCT 
-        CASE 
-          WHEN senderUsername = ? THEN receiverUsername 
-          ELSE senderUsername 
-        END as partner
-      FROM messages 
-      WHERE senderUsername = ? OR receiverUsername = ?
-    `).all(session.username, session.username, session.username);
+    const messages = await Message.find({
+      $or: [{ senderUsername: session.username }, { receiverUsername: session.username }]
+    }).lean();
     
-    const partnerSet = new Set(partners.map((p: any) => p.partner));
+    const partnerSet = new Set(messages.map(m => m.senderUsername === session.username ? m.receiverUsername : m.senderUsername));
     if (partnerSet.size >= 20 && !partnerSet.has(receiverUsername)) {
       return res.status(403).json({ error: 'You have reached the maximum limit of 20 private chats.' });
     }
@@ -797,7 +696,6 @@ async function startServer() {
 
     const msgId = uuidv4();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    console.log(`[Diagnostic] Private Message Created | ID: ${msgId} | Now: ${new Date().toISOString()} | Expires: ${expiresAt}`);
     
     let fileUrl = bodyFileUrl || (file ? `/uploads/${file.filename}` : (driveFileUrl || null));
     
@@ -823,26 +721,28 @@ async function startServer() {
     const fileType = bodyFileType || (file ? file.mimetype : (driveFileType || null));
     const fileSize = bodyFileSize ? Number(bodyFileSize) : (file ? file.size : null);
 
-    const stmt = db.prepare(`
-      INSERT INTO messages (id, senderId, senderUsername, receiverUsername, content, parentId, fileUrl, fileName, fileType, fileSize, folderName, folderFiles, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    
-    stmt.run(msgId, session.id, session.username, receiverUsername, content || null, parentId || null, fileUrl, fileName, fileType, fileSize, folderName || null, folderFiles || null, expiresAt);
+    const sortUsers = [session.username, receiverUsername].sort();
+    const chatId = `${sortUsers[0]}_${sortUsers[1]}`;
 
-    const newMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
+    const newMsg = new Message({
+      _id: msgId, senderId: session.id, senderUsername: session.username, receiverUsername, chatId,
+      content: content || null, parentId: parentId || null, 
+      fileUrl, fileName, fileType, fileSize, folderName: folderName || null, folderFiles: folderFiles || null, 
+      expiresAt
+    });
     
-    // Broadcast message to specific room
-    io.to(receiverUsername).emit('new_message', newMsg);
-    // Also echo back to sender in case they are connected from multiple clients
-    io.to(session.username).emit('new_message', newMsg);
-    broadcastStorageUpdate();
+    await newMsg.save();
+
+    const msgObj = { ...newMsg.toObject(), id: newMsg._id };
     
-    res.json(newMsg);
+    io.to(receiverUsername).emit('new_message', msgObj);
+    io.to(session.username).emit('new_message', msgObj);
+    await broadcastStorageUpdate();
+    
+    res.json(msgObj);
   });
 
-
-  const handleFolderDownload = (req: any, res: any, item: any) => {
+    const handleFolderDownload = (req: any, res: any, item: any) => {
     if (!item || !item.folderFiles) {
       return res.status(404).json({ error: 'Folder not found' });
     }
@@ -898,9 +798,9 @@ async function startServer() {
     processFiles();
   };
 
-  app.get('/api/messages/:id/download-folder', requireSession, (req: any, res: any) => {
-    const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;
-    if (!msg) return res.status(404).json({ error: 'Not found' });
+  app.get('/api/messages/:id/download-folder', requireSession, async (req: any, res: any) => {
+    const msg = await Message.findById(req.params.id);
+    if (!msg || new Date(msg.expiresAt) <= new Date()) return res.status(404).json({ error: 'Not found' });
     if (msg.senderUsername !== req.session.username && msg.receiverUsername !== req.session.username) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
@@ -985,95 +885,94 @@ async function startServer() {
     }
   });
 
-  app.get('/api/messages/:id/download-file', requireSession, (req: any, res: any) => {
+  app.get('/api/messages/:id/download-file', requireSession, async (req: any, res: any) => {
     const filename = req.query.filename;
-    const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id) as any;
-    if (!msg) return res.status(404).json({ error: 'Not found' });
+    const msg = await Message.findById(req.params.id);
+    if (!msg || new Date(msg.expiresAt) <= new Date()) return res.status(404).json({ error: 'Not found' });
     if (msg.senderUsername !== req.session.username && msg.receiverUsername !== req.session.username) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     handleIndividualFileDownload(req, res, msg, filename);
   });
 
-  app.get('/api/posts/:id/download-folder', requireSession, (req: any, res: any) => {
-    const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(req.params.id) as any;
-    if (!post) return res.status(404).json({ error: 'Not found' });
+  app.get('/api/posts/:id/download-folder', requireSession, async (req: any, res: any) => {
+    const post = await Post.findById(req.params.id);
+    if (!post || new Date(post.expiresAt) <= new Date()) return res.status(404).json({ error: 'Not found' });
     handleFolderDownload(req, res, post);
   });
 
-  app.get('/api/posts/:id/download-file', requireSession, (req: any, res: any) => {
+  app.get('/api/posts/:id/download-file', requireSession, async (req: any, res: any) => {
     const filename = req.query.filename;
-    const post = db.prepare('SELECT * FROM posts WHERE id = ?').get(req.params.id) as any;
-    if (!post) return res.status(404).json({ error: 'Not found' });
+    const post = await Post.findById(req.params.id);
+    if (!post || new Date(post.expiresAt) <= new Date()) return res.status(404).json({ error: 'Not found' });
     handleIndividualFileDownload(req, res, post, filename);
   });
 
-
   // Toggle Pin Message
-  app.post('/api/messages/:id/pin', requireSession, (req: any, res: any) => {
+  app.post('/api/messages/:id/pin', requireSession, async (req: any, res: any) => {
     const messageId = req.params.id;
     const session = req.session;
-    const msg = db.prepare('SELECT senderUsername, receiverUsername, isPinned FROM messages WHERE id = ?').get(messageId) as any;
-    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    const msg = await Message.findById(messageId);
+    if (!msg || new Date(msg.expiresAt) <= new Date()) return res.status(404).json({ error: 'Message not found' });
     
     if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
-    const newPinned = msg.isPinned ? 0 : 1;
-    
-    const togglePinTransaction = db.transaction(() => {
-      db.prepare('UPDATE messages SET isPinned = ? WHERE id = ?').run(newPinned, messageId);
-      
-      let replacedId = null;
-      if (newPinned) {
-        db.prepare('INSERT OR IGNORE INTO pinned_messages (id, messageId, pinnedByUserId) VALUES (?, ?, ?)').run(uuidv4(), messageId, session.id);
-        
-        const chatPins = db.prepare(`
-            SELECT p.id, p.messageId
-            FROM pinned_messages p
-            JOIN messages m ON p.messageId = m.id
-            WHERE (m.senderUsername = ? AND m.receiverUsername = ?)
-               OR (m.senderUsername = ? AND m.receiverUsername = ?)
-            ORDER BY p.pinnedAt ASC
-        `).all(msg.senderUsername, msg.receiverUsername, msg.receiverUsername, msg.senderUsername) as any[];
-        
-        if (chatPins.length > 10) {
-            const oldest = chatPins[0];
-            db.prepare('DELETE FROM pinned_messages WHERE id = ?').run(oldest.id);
-            db.prepare('UPDATE messages SET isPinned = 0 WHERE id = ?').run(oldest.messageId);
-            replacedId = oldest.messageId;
-        }
-      } else {
-        db.prepare('DELETE FROM pinned_messages WHERE messageId = ?').run(messageId);
-      }
-      return replacedId;
-    });
-    
-    const replacedId = togglePinTransaction();
+    const newPinned = msg.isPinned ? false : true;
+    let replacedId = null;
 
-    io.to(msg.senderUsername).emit('message_pinned', { messageId, isPinned: newPinned });
-    io.to(msg.receiverUsername).emit('message_pinned', { messageId, isPinned: newPinned });
+    if (newPinned) {
+      msg.isPinned = true;
+      await msg.save();
+      
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const existingPin = await PinnedMessage.findOne({ messageId, pinnedByUserId: session.id });
+      if (!existingPin) {
+        const pin = new PinnedMessage({
+          _id: uuidv4(), messageId, pinnedByUserId: session.id, chatId: msg.chatId, expiresAt
+        });
+        await pin.save();
+      }
+
+      const chatPins = await PinnedMessage.find({ chatId: msg.chatId }).sort({ pinnedAt: 1 }).lean();
+      
+      if (chatPins.length > 10) {
+          const oldest = chatPins[0];
+          await PinnedMessage.deleteOne({ _id: oldest._id });
+          await Message.updateOne({ _id: oldest.messageId }, { $set: { isPinned: false } });
+          replacedId = oldest.messageId;
+      }
+    } else {
+      msg.isPinned = false;
+      await msg.save();
+      await PinnedMessage.deleteMany({ messageId });
+    }
+
+    io.to(msg.senderUsername).emit('message_pinned', { messageId, isPinned: newPinned ? 1 : 0 });
+    io.to(msg.receiverUsername).emit('message_pinned', { messageId, isPinned: newPinned ? 1 : 0 });
     if (replacedId) {
         io.to(msg.senderUsername).emit('message_pinned', { messageId: replacedId, isPinned: 0, replaced: true });
         io.to(msg.receiverUsername).emit('message_pinned', { messageId: replacedId, isPinned: 0, replaced: true });
     }
 
-    return res.json({ success: true, isPinned: newPinned, replacedId });
+    return res.json({ success: true, isPinned: newPinned ? 1 : 0, replacedId });
   });
 
-  // Edit Message
-  app.put('/api/messages/:id', requireSession, (req: any, res: any) => {
+    // Edit Message
+  app.put('/api/messages/:id', requireSession, async (req: any, res: any) => {
     const messageId = req.params.id;
     const session = req.session;
     const { content } = req.body;
-    const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
-    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    const msg = await Message.findById(messageId);
+    if (!msg || new Date(msg.expiresAt) <= new Date()) return res.status(404).json({ error: 'Message not found' });
     if (msg.senderUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized to edit' });
     }
 
-    db.prepare('UPDATE messages SET content = ?, isEdited = 1 WHERE id = ?').run(content, messageId);
+    msg.content = content;
+    msg.isEdited = true;
+    await msg.save();
     
     io.to(msg.senderUsername).emit('edit_message', { messageId, content });
     io.to(msg.receiverUsername).emit('edit_message', { messageId, content });
@@ -1081,12 +980,12 @@ async function startServer() {
     return res.json({ success: true, content });
   });
 
-  // Delete Message
-  app.delete('/api/messages/:id', requireSession, (req: any, res: any) => {
+    // Delete Message
+  app.delete('/api/messages/:id', requireSession, async (req: any, res: any) => {
     const messageId = req.params.id;
     const session = req.session;
-    const msg = db.prepare('SELECT senderUsername, receiverUsername, fileUrl FROM messages WHERE id = ?').get(messageId) as any;
-    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    const msg = await Message.findById(messageId);
+    if (!msg || new Date(msg.expiresAt) <= new Date()) return res.status(404).json({ error: 'Message not found' });
     if (msg.senderUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized to delete' });
     }
@@ -1108,52 +1007,48 @@ async function startServer() {
       }
     }
 
-    db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
-    db.prepare('DELETE FROM message_reactions WHERE messageId = ?').run(messageId);
+    await Message.deleteOne({ _id: messageId });
+    await MessageReaction.deleteMany({ messageId });
+    await PinnedMessage.deleteMany({ messageId });
     
     io.to(msg.senderUsername).emit('delete_message', { messageId });
     io.to(msg.receiverUsername).emit('delete_message', { messageId });
-    broadcastStorageUpdate();
+    await broadcastStorageUpdate();
     
     return res.json({ success: true });
   });
 
-  // React to Message
-  app.post('/api/messages/:id/react', requireSession, (req: any, res: any) => {
+    // React to Message
+  app.post('/api/messages/:id/react', requireSession, async (req: any, res: any) => {
     const messageId = req.params.id;
     const session = req.session;
     const { emoji } = req.body;
-    const msg = db.prepare('SELECT senderUsername, receiverUsername FROM messages WHERE id = ?').get(messageId) as any;
-    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    const msg = await Message.findById(messageId);
+    if (!msg || new Date(msg.expiresAt) <= new Date()) return res.status(404).json({ error: 'Message not found' });
     
-    // Check if user is authorized to react (must be sender or receiver)
     if (msg.senderUsername !== session.username && msg.receiverUsername !== session.username) {
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-    // Check if user already reacted to this message at all
-    const existing = db.prepare('SELECT id, emoji FROM message_reactions WHERE messageId = ? AND username = ?').get(messageId, session.username) as any;
+    const existing = await MessageReaction.findOne({ messageId, username: session.username });
     
     if (existing) {
-      // Remove the old reaction
-      db.prepare('DELETE FROM message_reactions WHERE id = ?').run(existing.id);
+      await MessageReaction.deleteOne({ _id: existing._id });
       io.to(msg.senderUsername).emit('message_reaction', { messageId, username: session.username, emoji: existing.emoji, removed: true });
       io.to(msg.receiverUsername).emit('message_reaction', { messageId, username: session.username, emoji: existing.emoji, removed: true });
       
-      // If they clicked the exact same emoji, it's a toggle-off.
       if (existing.emoji === emoji) {
         return res.json({ success: true, removed: true });
       }
     }
     
-    // Add the new reaction
     const reactionId = uuidv4();
-    db.prepare(`
-      INSERT INTO message_reactions (id, messageId, username, emoji, expiresAt)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(reactionId, messageId, session.username, emoji, expiresAt);
+    const reaction = new MessageReaction({
+      _id: reactionId, messageId, username: session.username, emoji, expiresAt
+    });
+    await reaction.save();
     
     const newReaction = { id: reactionId, messageId, username: session.username, emoji };
     io.to(msg.senderUsername).emit('message_reaction', newReaction);
@@ -1164,7 +1059,7 @@ async function startServer() {
 
   // --- Sockets ---
   io.on('connection', (socket) => {
-    socket.emit('storage_updated', calculateStorageUsage());
+    calculateStorageUsage().then(usage => socket.emit('storage_updated', usage));
 
     socket.on('join', (username: string) => {
       if (username) {
@@ -1182,40 +1077,40 @@ async function startServer() {
       io.to(data.to).emit('stop_typing', { username: data.from });
     });
 
-    socket.on('message_delivered', (data) => {
+    socket.on('message_delivered', async (data) => {
       try {
-        db.prepare(`
-          UPDATE messages SET status = 'delivered' 
-          WHERE id = ? AND status = 'sent'
-        `).run(data.messageId);
+        await Message.updateOne(
+          { _id: data.messageId, status: 'sent' },
+          { $set: { status: 'delivered' } }
+        );
         io.to(data.senderUsername).emit('message_status_update', { messageId: data.messageId, status: 'delivered' });
       } catch(e) {}
     });
 
-    socket.on('messages_seen', (data) => {
+    socket.on('messages_seen', async (data) => {
       try {
         const nowIso = new Date().toISOString();
-        db.prepare(`
-          UPDATE messages SET status = 'seen', seenAt = ? 
-          WHERE senderUsername = ? AND receiverUsername = ? AND status != 'seen'
-        `).run(nowIso, data.to, data.from); // from is the one who saw it, so receiver = from, sender = to
+        await Message.updateMany(
+          { senderUsername: data.to, receiverUsername: data.from, status: { $ne: 'seen' } },
+          { $set: { status: 'seen', seenAt: nowIso } }
+        );
         io.to(data.to).emit('messages_seen', { by: data.from, seenAt: nowIso });
       } catch(e) {}
     });
   });
 
   // --- Diagnostic Expiration Route ---
-  app.get('/api/diagnostics/expiration', (req: any, res: any) => {
+  app.get('/api/diagnostics/expiration', async (req: any, res: any) => {
     try {
       const now = new Date().toISOString();
       const nextHour = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       
-      const posts = db.prepare('SELECT id, createdAt, expiresAt FROM posts ORDER BY createdAt DESC LIMIT 5').all();
-      const messages = db.prepare('SELECT id, createdAt, expiresAt FROM messages ORDER BY createdAt DESC LIMIT 5').all();
-      const sessions = db.prepare('SELECT id, expiresAt FROM sessions ORDER BY expiresAt DESC LIMIT 5').all();
+      const posts = await Post.find().sort({ createdAt: -1 }).limit(5).select('_id createdAt expiresAt').lean();
+      const messages = await Message.find().sort({ createdAt: -1 }).limit(5).select('_id createdAt expiresAt').lean();
+      const sessions = await Session.find().sort({ expiresAt: -1 }).limit(5).select('_id expiresAt').lean();
       
-      const soonExpiringPosts = db.prepare('SELECT COUNT(*) as count FROM posts WHERE expiresAt < ?').get(nextHour);
-      const soonExpiringMessages = db.prepare('SELECT COUNT(*) as count FROM messages WHERE expiresAt < ?').get(nextHour);
+      const soonExpiringPosts = await Post.countDocuments({ expiresAt: { $lt: nextHour } });
+      const soonExpiringMessages = await Message.countDocuments({ expiresAt: { $lt: nextHour } });
 
       res.json({
         serverTime: now,
@@ -1225,8 +1120,8 @@ async function startServer() {
           calculated24hISO: new Date(Date.now() + (24 * 60 * 60 * 1000)).toISOString()
         },
         expiringWithinOneHour: {
-          posts: (soonExpiringPosts as any).count,
-          messages: (soonExpiringMessages as any).count
+          posts: soonExpiringPosts,
+          messages: soonExpiringMessages
         },
         latestRecords: {
           posts,
@@ -1242,19 +1137,18 @@ async function startServer() {
   // --- Background Cleanup ---
   // Delete expired items every minute
   setInterval(async () => {
+    try {
     const now = new Date().toISOString();
     
     // Select files to delete from FS and Cloudinary
-    const expiredPosts = db.prepare('SELECT fileUrl FROM posts WHERE expiresAt < ? AND fileUrl IS NOT NULL').all(now) as any[];
-    const expiredMsgs = db.prepare('SELECT fileUrl FROM messages WHERE expiresAt < ? AND fileUrl IS NOT NULL').all(now) as any[];
+    const expiredPosts = await Post.find({ expiresAt: { $lt: now }, fileUrl: { $ne: null } }).lean();
+    const expiredMsgs = await Message.find({ expiresAt: { $lt: now }, fileUrl: { $ne: null } }).lean();
     
     for (const item of [...expiredPosts, ...expiredMsgs]) {
       if (item.fileUrl) {
         if (item.fileUrl.includes('cloudinary.com')) {
           if (process.env.CLOUDINARY_CLOUD_NAME) {
             try {
-              // Extract public_id from Cloudinary URL
-              // Format: https://res.cloudinary.com/<cloud_name>/<resource_type>/<type>/<version>/<public_id>.<ext>
               const urlParts = item.fileUrl.split('/');
               const filenameWithExt = urlParts[urlParts.length - 1];
               const publicId = filenameWithExt.split('.')[0];
@@ -1271,18 +1165,24 @@ async function startServer() {
       }
     }
 
-    // We'll let the DB clean up CASCADE, but explicitly clean pinned records to be safe:
-    db.prepare('DELETE FROM pinned_posts WHERE postId IN (SELECT id FROM posts WHERE expiresAt < ?)').run(now);
-    db.prepare('DELETE FROM pinned_messages WHERE messageId IN (SELECT id FROM messages WHERE expiresAt < ?)').run(now);
+    // Since MongoDB TTL might handle deleting documents, we do our best effort manual cleanup
+    // for cloud files above. If TTL deleted it before this tick, we might miss the fileUrl.
+    // However, TTL in MongoDB isn't instantaneous (usually runs every 60s), so we race it.
+    // It is recommended to use TTL indexes for DB cleanup and a separate cloud function or cron for storage,
+    // but we will keep this loop for safety.
 
-    db.prepare('DELETE FROM posts WHERE expiresAt < ?').run(now);
-    db.prepare('DELETE FROM message_reactions WHERE expiresAt < ?').run(now);
-    db.prepare('DELETE FROM messages WHERE expiresAt < ?').run(now);
-    db.prepare('DELETE FROM sessions WHERE expiresAt < ?').run(now);
+    // Let's manually trigger deletion to ensure cloud files aren't missed.
+    await PinnedPost.deleteMany({ postId: { $in: expiredPosts.map(p => p._id) } });
+    await PinnedMessage.deleteMany({ messageId: { $in: expiredMsgs.map(m => m._id) } });
+    
+    await Post.deleteMany({ expiresAt: { $lt: now } });
+    await MessageReaction.deleteMany({ expiresAt: { $lt: now } });
+    await Message.deleteMany({ expiresAt: { $lt: now } });
+    await Session.deleteMany({ expiresAt: { $lt: now } });
 
-    broadcastStorageUpdate();
+    await broadcastStorageUpdate();
+    } catch(e) {}
   }, 60 * 1000);
-
 
   // --- Vite Middleware ---
   if (process.env.NODE_ENV !== "production") {

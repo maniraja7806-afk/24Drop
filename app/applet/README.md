@@ -31,7 +31,7 @@ A modern, real-time communication platform for private chats and public broadcas
 - Socket.io (Real-time bidirectional event-based communication)
 
 **Database & Storage:**
-- SQLite (via `better-sqlite3` for lightweight, fast data persistence)
+- MongoDB Atlas for persistent scalable storage
 - Cloudinary (for robust image and media hosting via `multer`)
 
 ## Usage
