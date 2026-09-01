@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TimerReset, Zap } from 'lucide-react';
+import { TimerReset, Zap, RefreshCw } from 'lucide-react';
 import { fetchApi } from '../lib/api';
 
 export function Landing({ onClaim }: { onClaim: (session: any) => void }) {
@@ -120,8 +120,16 @@ export function Landing({ onClaim }: { onClaim: (session: any) => void }) {
         </div>
 
         <div ref={identityRef} className="w-full bg-white/5 border border-white/10 rounded-3xl p-6 backdrop-blur-xl relative">
-          <div className="mb-6 text-center">
+          <div className="mb-6 flex items-center justify-between">
             <h3 className="text-sm font-medium text-neutral-400 uppercase tracking-widest">Select temporary identity</h3>
+            <button 
+              onClick={() => generate(true)}
+              disabled={loading}
+              className="p-1.5 hover:bg-white/10 rounded-full transition-colors text-neutral-400 hover:text-white disabled:opacity-50"
+              title="Generate new names"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
           </div>
 
           <div className="grid grid-cols-1 gap-3">
